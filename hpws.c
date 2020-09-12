@@ -174,7 +174,7 @@ int main(int argc, char **argv)
         goto handshake_error;
     buf[bytes_read] = '\0';
 
-    
+    printf("%s\n", buf);
     static char to_find[] = "Sec-WebSocket-Key: ";
     static char magic_string[] = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11";
     
@@ -221,90 +221,170 @@ int main(int argc, char **argv)
     char fin = 0;
     short opcode = 0;
 
-    unsigned long masking_key = 0;
 
     int wait_for_bytes = 0;
-    #define AT_LEAST(x)\
-    {if (bytes_read < (x)) {\
-        wait_for_bytes = x;\
+    #define AT_LEAST(x, offset, bytes_read, wait_for_bytes)\
+    {if (bytes_read - offset < (x)) {\
+        wait_for_bytes = x + offset;\
         continue;\
     }}
 
-    char in_header = 1;
-    uint64_t payload_bytes_remaining = 0;
-    uint32_t masking_key = 0;
+    #define ERROR(x)\
+    {\
+        fprintf(stderr, "error: %s\n", (x));\
+        goto handshake_error;\
+    }
 
+    #define STORE_MASKING_KEY(masking_key_raw, buf, o, offset)\
+    {\
+        printf("storing new masking key\n");\
+        masking_key_raw[0] = buf[offset + o + 0];\
+        masking_key_raw[1] = buf[offset + o + 1];\
+        masking_key_raw[2] = buf[offset + o + 2];\
+        masking_key_raw[3] = buf[offset + o + 3];\
+        masking_key_raw[4] = buf[offset + o + 0];\
+        masking_key_raw[5] = buf[offset + o + 1];\
+        masking_key_raw[6] = buf[offset + o + 2];\
+        masking_key_raw[7] = buf[offset + o + 3];\
+        masking_key_raw[8] = buf[offset + o + 0];\
+        masking_key_raw[9] = buf[offset + o + 1];\
+        masking_key_raw[10] = buf[offset + o + 2];\
+        masking_key_raw[11] = buf[offset + o + 3];\
+    }
 
-    while ( (bytes_read += SSL_read(ssl, buf + bytes_read, BUFFER_LENGTH - bytes_read)) > 0 ) 
+    char state = 1;
+    uint64_t payload_bytes_processed = 0;
+    uint64_t payload_bytes_expected = 0;
+
+    char masking_key_raw[12];
+    uint64_t* masking_key = (uint64_t*)(masking_key_raw);
+
+    int offset = 0;
+    int preliminary_size = 0;
+    int read_result = 0;
+    bytes_read = 0;
+    while (1)
     {
-        if ( bytes_read < wait_for_bytes )
-            continue;
-
-        int offset = 0;
-        if ( in_header )
-        {
-            // we can't start parsing a header until we have the first two bytes
-            AT_LEAST(2);
-            
-            // read a header, will always have at least 2 bytes
-            fin = buf[0] >> 7;
-            if (buf[0] & 0b01110000)
-                goto handshake_error;
-
-            // parse opcode            
-            opcode = buf[0] & 0b00001111; 
-       
-
-            // check mask flag is present
-            if (buf[1] >> 7 == 0)
-                goto handshake_error; 
- 
-            // parse size
-            int preliminary_size = buf[1] & 0b01111111;
-
-            if (preliminary_size == 126) {
-                AT_LEAST(8);
-                payload_bytes_remaining = 
-                    (buf[2] << 8) + 
-                    (buf[3] << 0);
-                masking_key = 
-                    (buf[4] << 24) +
-                    (buf[5] << 16) +
-                    (buf[6] << 8) +
-                    (buf[7] << 0);
-                    offset = 8;
-            } else if (preliminary_size == 127) {
-                AT_LEAST(14);
-                payload_bytes_remaining = 
-                    (buf[2] << 56) + 
-                    (buf[3] << 48) + 
-                    (buf[4] << 40) + 
-                    (buf[5] << 32) + 
-                    (buf[6] << 24) + 
-                    (buf[7] << 16) + 
-                    (buf[8] << 8) + 
-                    (buf[9] << 0); 
-                masking_key = 
-                    (buf[10] << 24) +
-                    (buf[11] << 16) +
-                    (buf[12] << 8) +
-                    (buf[13] << 0);
-                    offset = 14;
-            } else {
-                AT_LEAST(6);
-                masking_key = 
-                    (buf[2] << 24) +
-                    (buf[3] << 16) +
-                    (buf[4] << 8) +
-                    (buf[5] << 0);
-                    offset = 6;
-            }
-            in_header = 0;
+        if (bytes_read + 22 > BUFFER_LENGTH && state == 1 && offset > 0) {
+            // we can't fit a full header in the remaining buffer
+            // memcpy it back to start
+            bytes_read -= offset;
+            memcpy(buf, buf + offset, bytes_read);
+            offset = 0;
         }
 
-        // execution beyond here is payload
-        
+        if (( read_result = SSL_read( ssl, buf + bytes_read, BUFFER_LENGTH - bytes_read - 8 ) ) <= 0)
+            break;
 
+        bytes_read += read_result;
+
+        printf(
+                "bytes_read: %d\n"
+                "wait_for_bytes: %d\n"
+                "state: %d\n"
+                "offset: %d\n",
+
+                bytes_read, wait_for_bytes, state, offset)
+;        
+        if ( state < 3 && bytes_read < wait_for_bytes )
+            continue;
+
+        //buf[BUFFER_LENGTH-1] = '\0';
+        //printf("buffer:\n---\n%s\n---\n", buf);
+
+        switch ( state )
+        {
+            case 1:       
+            // read a header, will always have at least 2 bytes
+            AT_LEAST(2, offset, bytes_read, wait_for_bytes);
+            fin = buf[offset + 0] >> 7;
+            if (buf[offset + 0] & 0b01110000)
+                ERROR("rsv1-3 must be 0");
+
+            // parse opcode            
+            opcode = buf[offset + 0] & 0b00001111; 
+
+            // check mask flag is present
+            if (buf[offset + 1] >> 7 == 0)
+                ERROR("masking flag nil");
+ 
+            // parse size
+            preliminary_size = buf[offset + 1] & 0b01111111;
+
+            ++state;
+
+            case 2:
+            if (preliminary_size == 126) {
+                AT_LEAST(8, offset, bytes_read, wait_for_bytes);
+                payload_bytes_expected = 
+                    ((uint64_t)buf[offset + 2] << 8) + 
+                    ((uint64_t)buf[offset + 3] << 0);
+                STORE_MASKING_KEY(masking_key_raw, buf, 4, offset);
+                offset += 8;
+            } else if (preliminary_size == 127) {
+                AT_LEAST(14, offset, bytes_read, wait_for_bytes);
+                payload_bytes_expected = 
+                    ((uint64_t)buf[offset + 2] << 56) + 
+                    ((uint64_t)buf[offset + 3] << 48) + 
+                    ((uint64_t)buf[offset + 4] << 40) + 
+                    ((uint64_t)buf[offset + 5] << 32) + 
+                    ((uint64_t)buf[offset + 6] << 24) + 
+                    ((uint64_t)buf[offset + 7] << 16) + 
+                    ((uint64_t)buf[offset + 8] << 8) + 
+                    ((uint64_t)buf[offset + 9] << 0); 
+                STORE_MASKING_KEY(masking_key_raw, buf, 10, offset);
+                offset += 14;
+            } else {
+                AT_LEAST(6, offset, bytes_read, wait_for_bytes);
+                payload_bytes_expected = preliminary_size;
+                STORE_MASKING_KEY(masking_key_raw, buf, 2, offset);
+                offset += 6;
+            }            
+            ++state;
+
+            case 3:;
+                
+                uint64_t read_cap = bytes_read;
+                uint64_t payload_bytes_remaining = payload_bytes_expected - payload_bytes_processed;
+                
+                printf("bytes_remaining: %d\nbytes_expected: %d\nbytes_processed: %d\n", 
+                    payload_bytes_remaining, payload_bytes_expected, payload_bytes_processed);                
+
+                if (bytes_read >= payload_bytes_remaining + offset) {
+                    read_cap = payload_bytes_remaining + offset;
+                    state = 4;
+                }          
+
+                // this is an extremely tight loop, we dont want unnecessary condition checking in it
+                for (uint64_t i = offset; i < read_cap ; i += 8)
+                    *(uint64_t*)(buf + i) ^=
+                        *((uint64_t*)(masking_key + (payload_bytes_processed  % 4)));
+                
+                // to keep the above loop tight we'll handle the edge case were we xor'd past the end
+                for (uint64_t i = read_cap; i < read_cap + (read_cap % 8); ++i)
+                    buf[i] ^= masking_key_raw[ (payload_bytes_processed + i) % 4 ];
+
+                printf("packet: `%.*s`\n", (int)read_cap - offset, buf + offset);
+    
+                if (state == 4) 
+                {
+                    // we're up to the next frame
+                    offset = read_cap;
+                    state = 1;
+                    payload_bytes_processed = 0;
+                    continue;
+                } 
+                
+                payload_bytes_processed += (read_cap - offset);
+                offset = 0;
+                bytes_read = 0;
+                continue;
+                 
+
+            default:
+                ERROR("invalid state");
+            // execution beyond here is payload
+        }
     }
 
     goto end;
