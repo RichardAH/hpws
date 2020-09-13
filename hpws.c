@@ -162,7 +162,7 @@ int main(int argc, char **argv)
     SSL_set_fd(ssl, client);
     if (SSL_accept(ssl) <= 0) {
         ERR_print_errors_fp(stderr);
-        goto handshake_error;
+        goto end;
     }
         
     // read HTTP request 
@@ -171,7 +171,7 @@ int main(int argc, char **argv)
 
     int bytes_read = SSL_read(ssl, buf, BUFFER_LENGTH - 1);
     if (bytes_read < 1 || bytes_read > BUFFER_LENGTH - 1)
-        goto handshake_error;
+        goto end;
     buf[bytes_read] = '\0';
 
     printf("%s\n", buf);
@@ -181,17 +181,17 @@ int main(int argc, char **argv)
     // isolate the Key
     char* found = strstr( buf, to_find );
     if (!found)
-        goto handshake_error;
+        goto end;
     char* lineend = strstr( found, "\r\n" );
     if (!lineend)
-        goto handshake_error;
+        goto end;
 
     *lineend = 0;
     found += sizeof(to_find) - 1;
 
     // now concatenate our magic string to the end if there is space
     if ( BUFFER_LENGTH - ( lineend - buf ) <= sizeof(magic_string) )
-        goto handshake_error;
+        goto end;
     strcpy( lineend, magic_string );
     
     // compute SHA1 of the magic string
@@ -201,7 +201,7 @@ int main(int argc, char **argv)
     // encode as base64
     char base64[ BASE64_LEN(SHA_DIGEST_LENGTH) ]; 
     if (!base64_encode( hash, SHA_DIGEST_LENGTH,  base64, sizeof(base64)))
-        goto handshake_error;
+        goto end;
 
     // write a repsonse 
     int bytes_to_write = snprintf(buf, BUFFER_LENGTH, 
@@ -211,7 +211,7 @@ int main(int argc, char **argv)
         "Sec-WebSocket-Accept: %s\r\n"
         "\r\n", base64);
     if (bytes_to_write < 1)
-        goto handshake_error;
+        goto end;
     SSL_write(ssl, buf, bytes_to_write);
 
     // execute frame proxy loop for this client until disconnect
@@ -232,7 +232,7 @@ int main(int argc, char **argv)
     #define ERROR(x)\
     {\
         fprintf(stderr, "error: %s\n", (x));\
-        goto handshake_error;\
+        goto end;\
     }
 
     #define STORE_MASKING_KEY(masking_key_raw, buf, o, offset)\
@@ -252,12 +252,33 @@ int main(int argc, char **argv)
         masking_key_raw[11] = buf[offset + o + 3];\
     }
 
+    #define SEND_CLOSE_FRAME( reason_code, reason_string )\
+        {\
+            if (!sent_close_frame) {\
+                printf("sending close frame %d %s\n", reason_code, reason_string);\
+                unsigned char buf[127];\
+                buf[0] = 0b10001000;\
+                buf[1] = (char)(reason_string ?\
+                    ( sizeof(reason_string)-1 > 123 ? 123 : sizeof(reason_string)-1) : \
+                    2);\
+                buf[2] = ((reason_code) >> 8) & 0xff;\
+                buf[3] = ((reason_code) >> 0) & 0xff;\
+                if (buf[1] > 2)\
+                    memcpy(buf + 4, reason_string, (size_t)buf[1]-2);\
+                SSL_write(ssl, buf, (size_t)buf[1]);\
+                sent_close_frame = reason_code;\
+            }\
+        }
+
     char state = 1;
     uint64_t payload_bytes_processed = 0;
     uint64_t payload_bytes_expected = 0;
 
     char masking_key_raw[12];
     uint64_t* masking_key = (uint64_t*)(masking_key_raw);
+
+    int sent_close_frame = 0;
+    int received_close_frame = 0;
 
     int offset = 0;
     int preliminary_size = 0;
@@ -273,7 +294,9 @@ int main(int argc, char **argv)
             offset = 0;
         }
 
-        if (( read_result = SSL_read( ssl, buf + bytes_read, BUFFER_LENGTH - bytes_read - 8 ) ) <= 0)
+        if (( read_result = 
+                SSL_read( ssl, buf + bytes_read, BUFFER_LENGTH - bytes_read - 8 )) 
+            <= 0)
             break;
 
         bytes_read += read_result;
@@ -284,8 +307,8 @@ int main(int argc, char **argv)
                 "state: %d\n"
                 "offset: %d\n",
 
-                bytes_read, wait_for_bytes, state, offset)
-;        
+                bytes_read, wait_for_bytes, state, offset);
+        
         if ( state < 3 && bytes_read < wait_for_bytes )
             continue;
 
@@ -297,19 +320,57 @@ int main(int argc, char **argv)
             case 1:       
             // read a header, will always have at least 2 bytes
             AT_LEAST(2, offset, bytes_read, wait_for_bytes);
-            fin = buf[offset + 0] >> 7;
+
             if (buf[offset + 0] & 0b01110000)
                 ERROR("rsv1-3 must be 0");
 
             // parse opcode            
+            fin = buf[offset + 0] >> 7;
             opcode = buf[offset + 0] & 0b00001111; 
-
+            if (!opcode && fin)
+                ERROR("fin bit set on opcode 0");
+            
             // check mask flag is present
             if (buf[offset + 1] >> 7 == 0)
                 ERROR("masking flag nil");
  
             // parse size
             preliminary_size = buf[offset + 1] & 0b01111111;
+
+            printf("opcode: %d\n", opcode);
+            switch (opcode) {
+                case 0: // continuation frame
+                case 1: // text frame
+                case 2: // binary frame
+                    break;
+                case 8: // close frame
+                    {
+                        AT_LEAST(preliminary_size, offset, bytes_read, wait_for_bytes);
+                        received_close_frame = 1;
+                        SEND_CLOSE_FRAME(1000, "Bye!");
+                        goto end;
+                    }
+                case 9: // ping frame
+                case 10:  // pong frame, discard
+                    {
+                        // modify the opcode and send it back
+                        AT_LEAST(preliminary_size, offset, bytes_read, wait_for_bytes);
+                        if (opcode == 9) {        
+                            buf[offset + 0]++; // its a pong!
+                            if (!sent_close_frame)
+                                SSL_write(ssl, buf + offset, preliminary_size);
+                        }
+                        offset += preliminary_size;
+                        wait_for_bytes = 2;
+                        bytes_read -= offset;
+                        continue;
+                    }
+                default:
+                    {
+                        SEND_CLOSE_FRAME(1002, "Invalid opcode");
+                        goto end;
+                    }
+            }
 
             ++state;
 
@@ -387,12 +448,8 @@ int main(int argc, char **argv)
         }
     }
 
-    goto end;
+    end:;
 
-    handshake_error:
-    printf("handshake error\n");
-
-    end:
 
     SSL_shutdown(ssl);
     SSL_free(ssl);
