@@ -165,12 +165,15 @@ int main(int argc, char **argv)
         goto end;
     }
         
-    // read HTTP request 
-    #define BUFFER_LENGTH 4096
-    char buf[BUFFER_LENGTH];
+    #define SSL_BUFFER_LENGTH 4096
+    char buf[SSL_BUFFER_LENGTH];
 
-    int bytes_read = SSL_read(ssl, buf, BUFFER_LENGTH - 1);
-    if (bytes_read < 1 || bytes_read > BUFFER_LENGTH - 1)
+    // 16 mib, but should be made configurable later
+    #define SHM_BUFFER_LENGTH 16777216 
+
+    // read HTTP request 
+    int bytes_read = SSL_read(ssl, buf, SSL_BUFFER_LENGTH - 1);
+    if (bytes_read < 1 || bytes_read > SSL_BUFFER_LENGTH - 1)
         goto end;
     buf[bytes_read] = '\0';
 
@@ -190,7 +193,7 @@ int main(int argc, char **argv)
     found += sizeof(to_find) - 1;
 
     // now concatenate our magic string to the end if there is space
-    if ( BUFFER_LENGTH - ( lineend - buf ) <= sizeof(magic_string) )
+    if ( SSL_BUFFER_LENGTH - ( lineend - buf ) <= sizeof(magic_string) )
         goto end;
     strcpy( lineend, magic_string );
     
@@ -204,7 +207,7 @@ int main(int argc, char **argv)
         goto end;
 
     // write a repsonse 
-    int bytes_to_write = snprintf(buf, BUFFER_LENGTH, 
+    int bytes_to_write = snprintf(buf, SSL_BUFFER_LENGTH, 
         "HTTP/1.1 101 Switching Protocols\r\n"
         "Upgrade: websocket\r\n"
         "Connection: Upgrade\r\n"
@@ -215,44 +218,21 @@ int main(int argc, char **argv)
     SSL_write(ssl, buf, bytes_to_write);
 
     // execute frame proxy loop for this client until disconnect
-    //char buf_out[BUFFER_LENGTH];
     
-    
-    char fin = 0;
-    short opcode = 0;
-
-
-    int wait_for_bytes = 0;
-    #define AT_LEAST(x, offset, bytes_read, wait_for_bytes)\
+    #define AT_LEAST( x, offset, bytes_read, wait_for_bytes )\
     {if (bytes_read - offset < (x)) {\
         wait_for_bytes = x + offset;\
         continue;\
     }}
 
-    #define ERROR(x)\
-    {\
-        fprintf(stderr, "error: %s\n", (x));\
-        goto end;\
-    }
-
-    #define STORE_MASKING_KEY(masking_key_raw, buf, o, offset)\
+    #define STORE_MASKING_KEY( masking_key_raw, buf, o, offset )\
     {\
         printf("storing new masking key\n");\
-        masking_key_raw[0] = buf[offset + o + 0];\
-        masking_key_raw[1] = buf[offset + o + 1];\
-        masking_key_raw[2] = buf[offset + o + 2];\
-        masking_key_raw[3] = buf[offset + o + 3];\
-        masking_key_raw[4] = buf[offset + o + 0];\
-        masking_key_raw[5] = buf[offset + o + 1];\
-        masking_key_raw[6] = buf[offset + o + 2];\
-        masking_key_raw[7] = buf[offset + o + 3];\
-        masking_key_raw[8] = buf[offset + o + 0];\
-        masking_key_raw[9] = buf[offset + o + 1];\
-        masking_key_raw[10] = buf[offset + o + 2];\
-        masking_key_raw[11] = buf[offset + o + 3];\
+        for (int i = 0; i < 12; ++i)\
+            masking_key_raw[i] = buf[offset + o + (i % 4)];\
     }
 
-    #define SEND_CLOSE_FRAME( reason_code, reason_string )\
+    #define SEND_CLOSE_FRAME( ssl, reason_code, reason_string )\
         {\
             if (!sent_close_frame) {\
                 printf("sending close frame %d %s\n", reason_code, reason_string);\
@@ -270,23 +250,26 @@ int main(int argc, char **argv)
             }\
         }
 
-    char state = 1;
-    uint64_t payload_bytes_processed = 0;
-    uint64_t payload_bytes_expected = 0;
+    #define PROTOCOL_ERROR( ssl, msg )\
+        {\
+            SEND_CLOSE_FRAME( ssl, 1002, msg );\
+            goto end;\
+        }
 
+    // todo: bitpack bool fields
+    char state = 1;
+    char fin = 0;
+    short opcode = 0;
+    int wait_for_bytes = 0;
     char masking_key_raw[12];
     uint64_t* masking_key = (uint64_t*)(masking_key_raw);
+    uint64_t payload_bytes_processed = 0, payload_bytes_expected = 0;
+    int sent_close_frame = 0, received_close_frame = 0, offset = 0, preliminary_size = 0, read_result = 0;
 
-    int sent_close_frame = 0;
-    int received_close_frame = 0;
-
-    int offset = 0;
-    int preliminary_size = 0;
-    int read_result = 0;
-    bytes_read = 0;
-    while (1)
+    for (bytes_read = 0;;)
     {
-        if (bytes_read + 22 > BUFFER_LENGTH && state == 1 && offset > 0) {
+        
+        if (bytes_read + 22 > SSL_BUFFER_LENGTH && state == 1 && offset > 0) {
             // we can't fit a full header in the remaining buffer
             // memcpy it back to start
             bytes_read -= offset;
@@ -295,9 +278,8 @@ int main(int argc, char **argv)
         }
 
         if (( read_result = 
-                SSL_read( ssl, buf + bytes_read, BUFFER_LENGTH - bytes_read - 8 )) 
-            <= 0)
-            break;
+                SSL_read( ssl, buf + bytes_read, SSL_BUFFER_LENGTH - bytes_read - 8 )) <= 0)
+            goto end;
 
         bytes_read += read_result;
 
@@ -312,9 +294,6 @@ int main(int argc, char **argv)
         if ( state < 3 && bytes_read < wait_for_bytes )
             continue;
 
-        //buf[BUFFER_LENGTH-1] = '\0';
-        //printf("buffer:\n---\n%s\n---\n", buf);
-
         switch ( state )
         {
             case 1:       
@@ -322,17 +301,17 @@ int main(int argc, char **argv)
             AT_LEAST(2, offset, bytes_read, wait_for_bytes);
 
             if (buf[offset + 0] & 0b01110000)
-                ERROR("rsv1-3 must be 0");
+                PROTOCOL_ERROR(ssl, "rsv1-3 must be 0");
 
             // parse opcode            
             fin = buf[offset + 0] >> 7;
             opcode = buf[offset + 0] & 0b00001111; 
             if (!opcode && fin)
-                ERROR("fin bit set on opcode 0");
+                PROTOCOL_ERROR(ssl, "fin bit set on opcode 0");
             
             // check mask flag is present
             if (buf[offset + 1] >> 7 == 0)
-                ERROR("masking flag nil");
+                PROTOCOL_ERROR(ssl, "masking flag nil");
  
             // parse size
             preliminary_size = buf[offset + 1] & 0b01111111;
@@ -347,7 +326,7 @@ int main(int argc, char **argv)
                     {
                         AT_LEAST(preliminary_size, offset, bytes_read, wait_for_bytes);
                         received_close_frame = 1;
-                        SEND_CLOSE_FRAME(1000, "Bye!");
+                        SEND_CLOSE_FRAME(ssl, 1000, "Bye!");
                         goto end;
                     }
                 case 9: // ping frame
@@ -367,7 +346,7 @@ int main(int argc, char **argv)
                     }
                 default:
                     {
-                        SEND_CLOSE_FRAME(1002, "Invalid opcode");
+                        SEND_CLOSE_FRAME(ssl, 1002, "Invalid opcode");
                         goto end;
                     }
             }
@@ -375,24 +354,20 @@ int main(int argc, char **argv)
             ++state;
 
             case 2:
+
             if (preliminary_size == 126) {
                 AT_LEAST(8, offset, bytes_read, wait_for_bytes);
                 payload_bytes_expected = 
-                    ((uint64_t)buf[offset + 2] << 8) + 
-                    ((uint64_t)buf[offset + 3] << 0);
+                    ((uint64_t)buf[offset + 2] << 8) + ((uint64_t)buf[offset + 3] << 0);
                 STORE_MASKING_KEY(masking_key_raw, buf, 4, offset);
                 offset += 8;
             } else if (preliminary_size == 127) {
                 AT_LEAST(14, offset, bytes_read, wait_for_bytes);
                 payload_bytes_expected = 
-                    ((uint64_t)buf[offset + 2] << 56) + 
-                    ((uint64_t)buf[offset + 3] << 48) + 
-                    ((uint64_t)buf[offset + 4] << 40) + 
-                    ((uint64_t)buf[offset + 5] << 32) + 
-                    ((uint64_t)buf[offset + 6] << 24) + 
-                    ((uint64_t)buf[offset + 7] << 16) + 
-                    ((uint64_t)buf[offset + 8] << 8) + 
-                    ((uint64_t)buf[offset + 9] << 0); 
+                    ((uint64_t)buf[offset + 2] << 56) + ((uint64_t)buf[offset + 3] << 48) + 
+                    ((uint64_t)buf[offset + 4] << 40) + ((uint64_t)buf[offset + 5] << 32) + 
+                    ((uint64_t)buf[offset + 6] << 24) + ((uint64_t)buf[offset + 7] << 16) + 
+                    ((uint64_t)buf[offset + 8] << 8) + ((uint64_t)buf[offset + 9] << 0); 
                 STORE_MASKING_KEY(masking_key_raw, buf, 10, offset);
                 offset += 14;
             } else {
@@ -440,16 +415,15 @@ int main(int argc, char **argv)
                 offset = 0;
                 bytes_read = 0;
                 continue;
-                 
 
             default:
-                ERROR("invalid state");
-            // execution beyond here is payload
+                SEND_CLOSE_FRAME(ssl, 1001, "Internal error");
+                goto end;
         }
     }
 
     end:;
-
+    printf("closing connection.\n");
 
     SSL_shutdown(ssl);
     SSL_free(ssl);
