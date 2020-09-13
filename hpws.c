@@ -178,7 +178,7 @@ int main(int argc, char **argv)
     buf[bytes_read] = '\0';
 
     printf("%s\n", buf);
-    static char to_find[] = "Sec-WebSocket-Key: ";
+    static char to_find[] = "Sec-WebSocket-Key:";
     static char magic_string[] = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11";
     
     // isolate the Key
@@ -191,6 +191,12 @@ int main(int argc, char **argv)
 
     *lineend = 0;
     found += sizeof(to_find) - 1;
+
+    // clear any linear whitespace at the start of the field
+    for (; (*found == ' ' || *found == '\t') && found < buf + SSL_BUFFER_LENGTH; ++found);
+
+    // clear any linear whitespace at the end of the field
+    for (; (*lineend == ' ' || *lineend == '\t') && lineend > found; --lineend);
 
     // now concatenate our magic string to the end if there is space
     if ( SSL_BUFFER_LENGTH - ( lineend - buf ) <= sizeof(magic_string) )
