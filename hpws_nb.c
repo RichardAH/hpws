@@ -338,42 +338,57 @@ int main(int argc, char **argv)
                 memmove(ssl_write_buf, ssl_write_buf + bytes_written, ssl_write_len - bytes_written);
             ssl_write_len -= bytes_written;
             ssl_write_buf = (char*)realloc(ssl_write_buf, ssl_write_len);
+            continue;
         }
 
         fprintf(stderr, "--a\n");
         // INCOMING DATA
         if (fdset[0].revents & POLLIN) {
+            
             bytes_read = read(client, ssl_buf, sizeof(ssl_buf));
-            fprintf(stderr, "raw bytes read %ld\n", bytes_read);
+            fprintf(stderr, "raw bytes read %ld\nrawbytes:`", bytes_read);
+            fwrite(ssl_buf, 1, bytes_read, stderr);
+            fprintf(stderr, "`\n");
             if (bytes_read <= 0) 
                 GOTO_ERROR("client closed connection", client_closed);
+
+            
+            fprintf(stderr, "--ab\n");
 
             bytes_written = BIO_write(rbio, ssl_buf, bytes_read);
             if (bytes_written <= 0)
                 GOTO_ERROR("could not write raw bytes to openssl from incoming socket", ssl_error);
                
+            fprintf(stderr, "--ac\n");
+
             if ( !SSL_is_init_finished(ssl) ) {
+                fprintf(stderr, "--ac1\n");
                 int n = SSL_do_handshake(ssl);
                 int e = SSL_get_error(ssl, n);
                 if (e == SSL_ERROR_WANT_WRITE || e == SSL_ERROR_WANT_READ) 
                     SSL_FLUSH_OUT()
                 else if (SSL_FAILED(e))
-                    GOTO_ERROR("unable to complete handshake", ssl_error); 
-            }
+                    GOTO_ERROR("unable to complete handshake-1", ssl_error); 
+                fprintf(stderr, "--ac2\n");
+            } 
 
-            if ( SSL_is_init_finished(ssl) ) {
+            if (SSL_is_init_finished(ssl)){
 
 
                     if ( ws_state == 0 ) {
                         // we do one single read when the ws hasn't protocol upgraded yet
                     
+                        fprintf(stderr, "--ae\n");
                         // todo: should we loop to ensure a complete http request?
                         int bytes_read = SSL_read( ssl, ws_buf, WS_BUFFER_LENGTH - 1 );
+                        fprintf(stderr, "--bytes read: %d\n", bytes_read); 
                         
                         if (bytes_read <= 0)
-                            GOTO_ERROR("no incoming http request for ws to process", ws_handshake_error);
+                            goto skip_ws;
 
                         ws_buf[bytes_read-1] = '\0';
+
+                        fprintf(stderr, "bytes: `%s`\n", ws_buf);
 
                     } else {
 
@@ -405,7 +420,8 @@ int main(int argc, char **argv)
                                 ws_bytes_read, ws_wait_for_bytes, ws_state, ws_offset);
                    
                     }
- 
+
+                    fprintf(stderr, "ws_state: %d\n", ws_state); 
                     if ( !( ws_state < 3 && ws_bytes_read < ws_wait_for_bytes) )
                     switch ( ws_state )
                     {
@@ -601,10 +617,12 @@ int main(int argc, char **argv)
                     SSL_FLUSH_OUT()
                 else if (SSL_FAILED(status))
                     GOTO_ERROR("unable to complete incoming read", ssl_error); 
+                
 
             }
         }
 
+        skip_ws:
         // encrypt pending ssl queue
         if (!SSL_is_init_finished(ssl))
             continue;
