@@ -266,6 +266,16 @@ int main(int argc, char **argv)
             }\
         }
 
+    #define WS_SEND_TEXT_FRAME( reason_string )\
+        {\
+            printf("sending test frame `%s`\n", reason_string);\
+            unsigned char buf[127];\
+            buf[0] = 0b10000001;\
+            buf[1] =  sizeof(reason_string)-1 > 125 ? 125 : sizeof(reason_string)-1;\
+            memcpy(buf + 2, reason_string, (size_t)buf[1]);\
+            SSL_ENQUEUE(buf, (size_t)buf[1]);\
+        }
+
     #define WS_PROTOCOL_ERROR( msg )\
         {\
             WS_SEND_CLOSE_FRAME( 1002, msg );\
@@ -365,10 +375,7 @@ int main(int argc, char **argv)
                 fprintf(stderr, "--ac1\n");
                 int n = SSL_do_handshake(ssl);
                 int e = SSL_get_error(ssl, n);
-                if (e == SSL_ERROR_WANT_WRITE || e == SSL_ERROR_WANT_READ) 
-                    SSL_FLUSH_OUT()
-                else if (SSL_FAILED(e))
-                    GOTO_ERROR("unable to complete handshake-1", ssl_error); 
+                SSL_FLUSH_OUT()
                 fprintf(stderr, "--ac2\n");
             } 
 
@@ -479,6 +486,8 @@ int main(int argc, char **argv)
                             SSL_ENQUEUE(ws_buf, bytes_to_write);
                                                    
                             ++ws_state;
+
+                            WS_SEND_TEXT_FRAME("hello world!\n");
                             break; 
                         }
 
@@ -610,15 +619,7 @@ int main(int argc, char **argv)
                             GOTO_ERROR("ws internal error", ws_protocol_error);
                     }
                     
-
-                status = SSL_get_error(ssl, bytes_read);
-
-                if (status == SSL_ERROR_WANT_WRITE) 
                     SSL_FLUSH_OUT()
-                else if (SSL_FAILED(status))
-                    GOTO_ERROR("unable to complete incoming read", ssl_error); 
-                
-
             }
         }
 
