@@ -1,11 +1,24 @@
 #ifndef HPWS_INCLUDE
 #define HPWS_INCLUDE
+#include <signal.h>
+#include <poll.h>
+
 #include <variant>
 #include <optional>
 #include <alloca.h>
+#include <sys/types.h>
+#include <sys/socket.h>
+#include <netinet/in.h>
+#include <signal.h>
+#include <sys/mman.h>
+#include <unistd.h>
+#include <vector>
+#include <stdio.h>
+#include <string.h>
+#include <fcntl.h>
+#include <sys/wait.h>
 
 namespace hpws {
-
     using error = std::pair<int, std::string>;
 
     // used when waiting for messages that should already be on the pipe
@@ -18,38 +31,58 @@ namespace hpws {
     class client {
 
     private: 
-        std::optional<server&> server; // if this client was created from an accept this is set
-        std::optional<int> child_pid;  // if this client was created by a connect this is set
-        int max_buffer_size; // this value can't be changed once it's established between the processes
+        int child_pid = -1;  // if this client was created by a connect this is set
+        // this value can't be changed once it's established between the processes
+        uint32_t max_buffer_size;
 
         bool moved = false;
-    public:
 
 
         sockaddr_in6 endpoint;
         int control_line_fd;
         int buffer_fd[4]; // 0 1 - in buffers, 2 3 - out buffers
         void* buffer[4];
+
+        // private constructor
+        client( 
+            sockaddr_in6 endpoint,
+            int control_line_fd,
+            uint32_t max_buffer_size,
+            int child_pid,
+            int buffer_fd[4],
+            void* buffer[4]) : 
+            endpoint(endpoint),
+            control_line_fd (control_line_fd),
+            max_buffer_size (max_buffer_size),
+            child_pid(child_pid)
+        {
+            for (int i = 0; i < 4; ++i) {
+                this->buffer[i] = buffer[i];
+                this->buffer_fd[i] = buffer_fd[i];
+            }
+        } 
+
+
+    public:
+
+
         // No copy constructor
         client(const client&) = delete;
 
         // only a move constructor
         client ( client&& old ) : 
-            server(old.server), 
             child_pid(old.child_pid), 
             max_buffer_size(old.max_buffer_size)  
         {
             old.moved = true;
         }
 
-        ~client {
+        ~client() {
             if (!moved) {
-                if (server.has_value())
-                    server.child_destroyed(this);                
 
                 // RH TODO ensure this pid terminates by following up with a SIGKILL
-                if (child_pid.has_value()) 
-                    kill(pid, SIGTERM);
+                if (child_pid > -1)
+                    kill(child_pid, SIGTERM);
                
                 for (int i = 0; i < 4; ++i) {
                     munmap(buffer[i], max_buffer_size);
@@ -72,14 +105,19 @@ namespace hpws {
         }
 */
         friend class server;
-    }
+    };
 
     class server {
 
-        int max_buffer_size;
-    public:
-        int master_control_fd;  
         int server_pid;
+        int master_control_fd;  
+        uint32_t max_buffer_size;
+
+    private:
+        //  private constructor
+        server ( int server_pid, int master_control_fd, uint32_t max_buffer_size ) 
+        : server_pid(server_pid), master_control_fd(master_control_fd), max_buffer_size(max_buffer_size) {}
+    public:
         
 
         std::variant<client, error> accept()
@@ -114,7 +152,7 @@ namespace hpws {
 
             // timeout or error
             if (ret < 1)
-                HPWS_SERVER_ERROR(202, "timeout waiting for hpws accept child message");
+                HPWS_ACCEPT_ERROR(202, "timeout waiting for hpws accept child message");
 
             // first thing we'll receive is the IP address structure of the client
             
@@ -145,64 +183,53 @@ namespace hpws {
                     if (buffer_fd[i] < 0)
                         HPWS_ACCEPT_ERROR(203, "child accept scm_rights a passed buffer fd was negative"); 
                     mapping[i] = 
-                        mmap( 0, max_buffer_size, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0 );
+                        mmap( 0, max_buffer_size, PROT_READ | PROT_WRITE, MAP_SHARED, buffer_fd[i], 0 );
                     if (mapping[i] == (void*)(-1))
                         HPWS_ACCEPT_ERROR(204, "could not mmap scm_rights passed buffer fd");
                 }
             }
 
-            return {
-                .endpoint = *(reinterpret_cast<sockaddr_in6*>(buf)),
-                .control_line_fd = child_fd,
-                .buffer_fd = { buffer_fd[0], buffer_fd[1], buffer_fd[2], buffer_fd[3] },
-                .buffer = { mapping[0], mapping[1], mapping[2], mapping[3] },
-                .max_buffer_size = this->max_buffer_size
+            return client {
+                *(reinterpret_cast<sockaddr_in6*>(buf)),
+                child_fd,
+                max_buffer_size,
+                -1,
+                buffer_fd,
+                mapping
             };
     
         }
     
-        static std::variant<server, error> create_server(
-            std::string_view binary_path,
+        static std::variant<server, error> create(
+            std::string_view bin_path,
             uint32_t max_buffer_size,
             uint16_t port,
+            uint32_t max_con,
+            uint16_t max_con_per_ip,
             std::string_view cert_path,
             std::string_view key_path,
-            std::vector<std::string_view> additional_arguments, 
+            std::vector<std::string_view> argv //additional_arguments 
         ){
-
-            int error_code = -1;
-            char* error_msg = NULL;
             #define HPWS_SERVER_ERROR(code, msg)\
+            {\
                 error_code = code;\
                 error_msg = msg;\
                 goto server_error;\
             }
-            
+
+            int error_code = -1;
+            const char* error_msg = NULL;
             int fd[2] = {-1, -1}; 
             int pid = -1;            
+            int count_args = 17 + argv.size();
+            char const ** argv_pass = NULL;
 
             if (socketpair(AF_UNIX, SOCK_SEQPACKET, 0, fd))
                 HPWS_SERVER_ERROR(100, "could not create unix domain socket pair");
 
             // construct the arguments
-
-            /*      ./bin
-                    --server
-                    --max_frame_size
-                    <max_frame_size>
-                    --port
-                    <port>
-                    --cert
-                    <cert>
-                    --key
-                    <key>
-                                
-                    ...args
-                    NULL
-            */
-
-
             char shm_size[32];
+
             if (snprintf(shm_size, 32, "%d", max_buffer_size) <= 0)
                 HPWS_SERVER_ERROR(90, "couldn't write shm size to string");
  
@@ -210,27 +237,38 @@ namespace hpws {
             if (snprintf(port_str, 6, "%d", port) <= 0)
                 HPWS_SERVER_ERROR(91, "couldn't write port to string");
 
-            int count_args = 11;
-            for (; argv[count_args]; ++count_args);
+            char max_con_str[11];
+            if (snprintf(max_con_str, 11, "%d", max_con) <= 0)
+                HPWS_SERVER_ERROR(92, "couldn't write max_con to string");
 
-            char** argv_pass =
-                reinterpret_cast<char**>(alloca(sizeof(char*)*count_args));
+            char max_con_per_ip_str[6];
+            if (snprintf(max_con_per_ip_str, 6, "%d", max_con_per_ip) <= 0)
+                HPWS_SERVER_ERROR(93, "couldn't write max_con_per_ip to string");
 
-            int upto = 0;
-            argv_pass[upto++] = path_to_binary;
-            argv_pass[upto++] = "--server";
-            argv_pass[upto++] = "--max_frame_size";
-            argv_pass[upto++] = shm_size;
-            argv_pass[upto++] = "--port";
-            argv_pass[upto++] = port_str;
-            argv_pass[upto++] = "--cert";
-            argv_pass[upto++] = cert.data();
-            argv_pass[upto++] = "--key";
-            argv_pass[upto++] = key.data();
-            
-            for (int i = 0; i < count_args - 3; ++i)
-                argv_pass[upto++] = argv[i];
-            argv_pass[upto] = NULL; 
+            argv_pass = 
+                reinterpret_cast<char const **>(alloca(sizeof(char*)*count_args));
+            {
+                int upto = 0;
+                argv_pass[upto++] = bin_path.data();
+                argv_pass[upto++] = "--server";
+                argv_pass[upto++] = "--max-frame-size";
+                argv_pass[upto++] = shm_size;
+                argv_pass[upto++] = "--port";
+                argv_pass[upto++] = port_str;
+                argv_pass[upto++] = "--cert";
+                argv_pass[upto++] = cert_path.data();
+                argv_pass[upto++] = "--key";
+                argv_pass[upto++] = key_path.data();
+                argv_pass[upto++] = "--contro-fd";
+                argv_pass[upto++] = "3";
+                argv_pass[upto++] = "--max-con";
+                argv_pass[upto++] = max_con_str;
+                argv_pass[upto++] = "--max-con-per-ip";
+                argv_pass[upto++] = max_con_per_ip_str;
+                for ( std::string_view& arg : argv )
+                    argv_pass[upto++] = arg.data();
+                argv_pass[upto] = NULL; 
+            }
 
             pid = vfork();
             if (pid) {
@@ -265,13 +303,13 @@ namespace hpws {
                     HPWS_SERVER_ERROR(2, "nil message sent by hpws on startup");
 
                 buf[bytes_read] = '\0';
-                if (strcmp(buf, "started") !== 0)
+                if (strncmp(buf, "started", 7) != 0)
                     HPWS_SERVER_ERROR(3, "unexpected content in message sent by hpws on startup");
 
-                return {
-                    .master_control_fd = fd[0],
-                    .server_pid = pid,
-                    .max_buffer_size = max_buffer_size
+                return server {
+                    pid,
+                    fd[0],
+                    max_buffer_size
                 };
 
             } else {
@@ -285,19 +323,24 @@ namespace hpws {
                 close(fd[1]);
                     
                 // we're assuming all fds above 3 will have close_exec flag
-                execl(path_to_binary, argv_pass);
+                execv(bin_path.data(), (char* const*)argv_pass);
+                // we will send a nil message down the pipe to help the parent know somethings gone wrong
+                char nil[1];
+                nil[0] = 0;
+                send(3, nil, 1, 0);
                 exit(1); // execl failure as child will always result in exit here
             
             }
-
+            
  
-            server_error:
+            server_error:;
+
                 // NB: execution to here can only happen in parent process            
                 // clean up any mess after error
                 if (pid > 0) 
                     kill(pid, SIGKILL); /* RH TODO change this to SIGTERM and set a timeout? */
                     int status;
-                    waitpid(pid, &status, 0 /* WNOHANG */);
+                    waitpid(pid, &status, 0 /* should we use WNOHANG? */);
                 if (fd[0] > 0)
                     close(fd[0]);
                 if (fd[1] > 0)
@@ -305,7 +348,7 @@ namespace hpws {
                 
                 return error{error_code, std::string{error_msg}};
         }
-    }
+    };
 }
 
 
