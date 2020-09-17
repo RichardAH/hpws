@@ -264,6 +264,10 @@ int main(int argc, char **argv)
         // RH todo: provide a way for listen loop (server) process to gracefully close and clean up fds
         int master_control_fd = control_fd; // control_fd will become client's fd every loop so make a note of original
     
+        char startup_msg[] = "startup";
+        if (send(master_control_fd, startup_msg, sizeof(startup_msg)-1, 0) != sizeof(startup_msg)-1)
+            ABEND(500, "could not send startup msg down control fd");
+
         // listen in an accept loop
         int listen_sock = create_listen(9001);
         for(;;) {

@@ -251,7 +251,7 @@ namespace hpws {
                 int upto = 0;
                 argv_pass[upto++] = bin_path.data();
                 argv_pass[upto++] = "--server";
-                argv_pass[upto++] = "--max-frame-size";
+                argv_pass[upto++] = "--maxmsg";
                 argv_pass[upto++] = shm_size;
                 argv_pass[upto++] = "--port";
                 argv_pass[upto++] = port_str;
@@ -259,11 +259,11 @@ namespace hpws {
                 argv_pass[upto++] = cert_path.data();
                 argv_pass[upto++] = "--key";
                 argv_pass[upto++] = key_path.data();
-                argv_pass[upto++] = "--contro-fd";
+                argv_pass[upto++] = "--cntlfd";
                 argv_pass[upto++] = "3";
-                argv_pass[upto++] = "--max-con";
+                argv_pass[upto++] = "--maxcon";
                 argv_pass[upto++] = max_con_str;
-                argv_pass[upto++] = "--max-con-per-ip";
+                argv_pass[upto++] = "--maxconip";
                 argv_pass[upto++] = max_con_per_ip_str;
                 for ( std::string_view& arg : argv )
                     argv_pass[upto++] = arg.data();
@@ -303,9 +303,10 @@ namespace hpws {
                     HPWS_SERVER_ERROR(2, "nil message sent by hpws on startup");
 
                 buf[bytes_read] = '\0';
-                if (strncmp(buf, "started", 7) != 0)
+                if (strncmp(buf, "startup", 7) != 0) {
+                    fprintf(stderr, "startup message: `%.*s`\n", bytes_read, buf);
                     HPWS_SERVER_ERROR(3, "unexpected content in message sent by hpws on startup");
-
+                }
                 return server {
                     pid,
                     fd[0],
