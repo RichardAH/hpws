@@ -171,11 +171,13 @@ int main(int argc, char **argv)
     // 16 mib, but should be made configurable later
     #define SHM_BUFFER_LENGTH 16777216 
 
+    sleep(5);
     // read HTTP request 
     int bytes_read = SSL_read(ssl, buf, SSL_BUFFER_LENGTH - 1);
     if (bytes_read < 1 || bytes_read > SSL_BUFFER_LENGTH - 1)
         goto end;
     buf[bytes_read] = '\0';
+
 
     printf("%s\n", buf);
     static char to_find[] = "Sec-WebSocket-Key:";

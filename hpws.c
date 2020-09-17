@@ -269,7 +269,7 @@ int main(int argc, char **argv)
             ABEND(500, "could not send startup msg down control fd");
 
         // listen in an accept loop
-        int listen_sock = create_listen(9001);
+        int listen_sock = create_listen(port);
         for(;;) {
 
             client = accept(listen_sock, (struct sockaddr*)&client_addr, &client_addr_len);
@@ -361,7 +361,7 @@ int main(int argc, char **argv)
     printf("connection established\n");
 
          
-    char* ws_buffers[4];//ws_buffer_length];
+    char* ws_buffer[4];//ws_buffer_length];
 
 
     // rotating (swapping) buffers in and out
@@ -377,6 +377,8 @@ int main(int argc, char **argv)
         memfd_create("core_to_hpws_1", 0),
         memfd_create("core_to_hpws_2", 0)
     };
+
+    int ws_buffer_locks[] = {0, 0, 0, 0};
     
     for (int i = 0; i < 4; ++i) {
         if (ws_buffer_fd[i] < 0) {
@@ -395,7 +397,7 @@ int main(int argc, char **argv)
             close(client);
             return 1;
         }
-        ws_buffers[i] = mapping;
+        ws_buffer[i] = mapping;
         printf("fd %d: %d - %x\n", i, ws_buffer_fd[i], mapping);   
     }
 
@@ -430,15 +432,11 @@ int main(int argc, char **argv)
 
 
     //todo: - limit ssl_read to the size of the current ws frame to avoid reading in part of the  next frame
-    //      - SCM_RIGHTS
-    //      - buffer swapping
-    //      - hpcore to hpws pipeline
+    //      - buffer swapping!
     //      - client mode
     //      - child process limit
     //      - ip limit
-    //      - cmd line specification of limits
-    //      - configurable SHM size
-
+    // 
 
     // set up SSL
     SSL *ssl;
@@ -468,6 +466,7 @@ int main(int argc, char **argv)
     memset(&fdset, 0, sizeof(fdset));
 
     fdset[0].fd = client;
+    fdset[1].fd = control_fd;
 
     #define SSL_FAILED(x) (\
         (x) != SSL_ERROR_WANT_WRITE &&\
@@ -572,19 +571,21 @@ int main(int argc, char **argv)
 
     int ws_bytes_received = 0;
 
-    char* ws_buf_decode = ws_buffers[0]; 
-    char* ws_buf_encode = ws_buffers[2]; 
+
+    char* ws_buf_decode = ws_buffer[0]; 
+    char* ws_buf_encode = ws_buffer[2]; 
 
 // \/ ----- END WS 
 
     for (;;) {
 
         fdset[0].events &= ~POLLOUT;
- 
+        fdset[1].events = POLLIN;
+
         if (ssl_write_len > 0)
             fdset[0].events |=  POLLOUT;
       
-        int ready = poll(&fdset[0], 1 /* todo: change later */, -1);
+        int ready = poll(&fdset[0], 2, -1);
 
         //printf("ready? %ld, sslwritelen %ld\n", ready, ssl_write_len);
 
@@ -592,15 +593,99 @@ int main(int argc, char **argv)
             continue;
 
         
-        if(fdset[0].revents & (POLLERR | POLLHUP | POLLNVAL) || read(client, ssl_buf, 0)) {
+        if(
+            fdset[0].revents & (POLLERR | POLLHUP | POLLNVAL) ||
+            read(client, ssl_buf, 0)
+        ) {
 
             int error = 0;
             socklen_t errlen = sizeof(error);
             getsockopt(client, SOL_SOCKET, SO_ERROR, (void *)&error, &errlen);
             printf("socket error: %d\n", error);
             
-            GOTO_ERROR("err hup nval", client_closed);   
+            GOTO_ERROR("websocket err hup nval", client_closed);   
         }
+
+        int dummy_buf[1];
+        if(
+            fdset[1].revents & (POLLERR | POLLHUP | POLLNVAL) ||
+            read(control_fd, dummy_buf, 0)
+        ) {
+
+            GOTO_ERROR("control fd err hup nval", control_closed);   
+        }
+
+        // deal with control line events
+        if ( fdset[1].revents & POLLIN )
+        {
+            char control_msg[12];
+            int bytes_read = recv(control_fd, control_msg, sizeof(control_msg), 0);
+            if (bytes_read < 1)
+                GOTO_ERROR("received invalid control message or control fd has broken or closed", control_closed);
+                
+            switch (*control_msg)
+            {
+                case 'c': // close
+                    GOTO_ERROR("control ordered close", force_closed);
+                    break;
+                case 'a': // ack, we can unlock the specified buffer
+                    int unlock = control_msg[1] - '0';
+                    ws_buffer_lock[unlock] = 0;
+                    break;
+                case 'o': // outgoing frame on buffer x, of size y
+                    if (bytes_read != 7)
+                        GOTO_ERROR("received invalid 'o' message from control fd", control_error);
+                    unsigned char binary = control_msg[1] - '0';
+                    int lock = control_msg[2] - '0' + 2;
+                    int size = *((uint32_t*)(control_msg + 3));
+                    // RH TODO do we want to check if the lock is already on the buffer?
+                    ws_buffer_lock[lock] = 1;
+                    {
+                        unsigned char header[16];
+                        buf[0] = 0b10000000 | binary;
+                        if (size < 126) {
+                            buf[1] = (char)(size);
+                            SSL_ENQUEUE(buf, 2);
+                        }
+                        else if (size <= 0xffff)
+                        {
+                            buf[1] = 126;
+                            buf[2] = ( size >> 8 ) & 0xff;
+                            buf[3] = ( size >> 0 ) & 0xff;
+                            SSL_ENQUEUE(buf, 4);
+                        }
+                        else
+                        {
+                            buf[1] = 127;
+                            buf[2] = ( size >> 56 ) & 0xff;
+                            buf[3] = ( size >> 48 ) & 0xff;
+                            buf[4] = ( size >> 40 ) & 0xff;
+                            buf[5] = ( size >> 32 ) & 0xff;
+                            buf[6] = ( size >> 24 ) & 0xff;
+                            buf[7] = ( size >> 16 ) & 0xff;
+                            buf[8] = ( size >>  8 ) & 0xff;
+                            buf[9] = ( size >>  0 ) & 0xff;
+                            SSL_ENQUEUE(buf, 10);
+                        }
+                     
+                        // RH TODO: up to here
+                        // need to produce logic that writes the decoded ws frames into an available
+                        // ws_buffer and then when the fin frame is processed sends that buffer to
+                        // hpcore
+                        // and visa versa for right here    
+                        //SSL_ENQUEUE(ws_buffer
+                    }
+                    break;
+                    
+
+                    
+            }
+            
+        } 
+
+
+        // end control line events
+
         
         // OUTGOING DATA
         if (fdset[0].revents & POLLOUT && ssl_write_len) {
@@ -633,6 +718,10 @@ int main(int argc, char **argv)
                 int n = SSL_do_handshake(ssl);
                 int e = SSL_get_error(ssl, n);
                 SSL_FLUSH_OUT()
+
+                char buf[1] = { 'r' }; // send 'ready' message
+                if (send(control_fd, buf, 1, 0) != 1)
+                    GOTO_ERROR("could not write ready message to control fd", control_error);
             } 
 
             if (SSL_is_init_finished(ssl)){
@@ -761,6 +850,10 @@ int main(int argc, char **argv)
                         //printf("opcode: %d\n", ws_opcode);
                         switch (ws_opcode) {
                             case 0: // continuation frame
+                                {
+
+                                    break;
+                                }
                             case 1: // text frame
                             case 2: // binary frame
                                 break;
@@ -916,6 +1009,9 @@ int main(int argc, char **argv)
     socket_error:;
     ssl_error:;
     client_closed:;
+    control_closed:;
+    control_error:;
+    force_closed:;
 
     printf("finished %d\n", getpid());
     close(client);

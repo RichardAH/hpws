@@ -22,7 +22,7 @@ namespace hpws {
     using error = std::pair<int, std::string>;
 
     // used when waiting for messages that should already be on the pipe
-    #define HPWS_SMALL_TIMEOUT 1
+    #define HPWS_SMALL_TIMEOUT 10
     // used when waiting for server process to spawn
     #define HPWS_LONG_TIMEOUT 1500 
 
@@ -109,16 +109,27 @@ namespace hpws {
 
     class server {
 
-        int server_pid;
-        int master_control_fd;  
-        uint32_t max_buffer_size;
-
     private:
+        int server_pid_;
+        int master_control_fd_;  
+        uint32_t max_buffer_size_;
+
         //  private constructor
         server ( int server_pid, int master_control_fd, uint32_t max_buffer_size ) 
-        : server_pid(server_pid), master_control_fd(master_control_fd), max_buffer_size(max_buffer_size) {}
+        : server_pid_(server_pid), master_control_fd_(master_control_fd), max_buffer_size_(max_buffer_size) {}
     public:
         
+        int server_pid() {
+            return server_pid_;
+        }
+
+        int master_control_fd() {
+            return master_control_fd_;
+        }
+
+        uint32_t max_buffer_size() {
+            return max_buffer_size_;
+        }
 
         std::variant<client, error> accept()
         {
@@ -133,7 +144,7 @@ namespace hpws {
                 child_msg.msg_controllen = sizeof(cmsgbuf);
 
                 int bytes_read = 
-                    recvmsg(this->master_control_fd, &child_msg, 0);
+                    recvmsg(this->master_control_fd_, &child_msg, 0);
                 struct cmsghdr *cmsg = CMSG_FIRSTHDR(&child_msg);
                 if (cmsg == NULL || cmsg -> cmsg_type != SCM_RIGHTS)
                     HPWS_ACCEPT_ERROR(200, "non-scm_rights message sent on master control line");
@@ -169,7 +180,7 @@ namespace hpws {
             {
                 struct msghdr child_msg = { 0 };
                 memset(&child_msg, 0, sizeof(child_msg));
-                char cmsgbuf[CMSG_SPACE(sizeof(int))];
+                char cmsgbuf[CMSG_SPACE(sizeof(int)*4)];
                 child_msg.msg_control = cmsgbuf;
                 child_msg.msg_controllen = sizeof(cmsgbuf);
 
@@ -180,10 +191,11 @@ namespace hpws {
                     HPWS_ACCEPT_ERROR(203, "non-scm_rights message sent on accept child control line");
                 memcpy(&buffer_fd, CMSG_DATA(cmsg), sizeof(buffer_fd));
                 for (int i = 0; i < 4; ++i) {
+                    fprintf(stderr, "scm passed buffer_fd[%d] = %d\n", i, buffer_fd[i]);
                     if (buffer_fd[i] < 0)
                         HPWS_ACCEPT_ERROR(203, "child accept scm_rights a passed buffer fd was negative"); 
                     mapping[i] = 
-                        mmap( 0, max_buffer_size, PROT_READ | PROT_WRITE, MAP_SHARED, buffer_fd[i], 0 );
+                        mmap( 0, max_buffer_size_, PROT_READ | PROT_WRITE, MAP_SHARED, buffer_fd[i], 0 );
                     if (mapping[i] == (void*)(-1))
                         HPWS_ACCEPT_ERROR(204, "could not mmap scm_rights passed buffer fd");
                 }
@@ -192,7 +204,7 @@ namespace hpws {
             return client {
                 *(reinterpret_cast<sockaddr_in6*>(buf)),
                 child_fd,
-                max_buffer_size,
+                max_buffer_size_,
                 -1,
                 buffer_fd,
                 mapping
