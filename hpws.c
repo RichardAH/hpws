@@ -361,7 +361,7 @@ int main(int argc, char **argv)
     printf("connection established\n");
 
          
-    char* ws_buffer[4];//ws_buffer_length];
+    char* ws_buffer[4];
 
 
     // rotating (swapping) buffers in and out
@@ -378,7 +378,8 @@ int main(int argc, char **argv)
         memfd_create("core_to_hpws_2", 0)
     };
 
-    int ws_buffer_locks[] = {0, 0, 0, 0};
+    // these record which buffers are awaiting an ack
+    int ws_buffer_lock[] = {0, 0}; // 0 is ws_buffer[0], 1, is ws_buffer[1]
     
     for (int i = 0; i < 4; ++i) {
         if (ws_buffer_fd[i] < 0) {
@@ -391,7 +392,9 @@ int main(int argc, char **argv)
             close(client);
             return 1;
         }
-        void* mapping = mmap(NULL, ws_buffer_length, PROT_WRITE | PROT_READ, MAP_SHARED, ws_buffer_fd[i], 0);
+        void* mapping =
+            mmap( NULL, ws_buffer_length, PROT_WRITE | PROT_READ,
+                  MAP_SHARED, ws_buffer_fd[i], 0 );
         if (mapping == (void*)-1) {
             perror("failed to mmap memfd\n");
             close(client);
@@ -573,7 +576,6 @@ int main(int argc, char **argv)
 
 
     char* ws_buf_decode = ws_buffer[0]; 
-    char* ws_buf_encode = ws_buffer[2]; 
 
 // \/ ----- END WS 
 
@@ -629,19 +631,24 @@ int main(int argc, char **argv)
                     GOTO_ERROR("control ordered close", force_closed);
                     break;
                 case 'a': // ack, we can unlock the specified buffer
+                    if (bytes_read != 2 || ( control_msg[1] != '0' && control_msg[1] != '1' ))
+                        GOTO_ERROR("received invalid 'c' message from control fd", control_error);
+
                     int unlock = control_msg[1] - '0';
                     ws_buffer_lock[unlock] = 0;
                     break;
+
                 case 'o': // outgoing frame on buffer x, of size y
-                    if (bytes_read != 7)
+                    if (bytes_read != 7 || 
+                        ( control_msg[1] != '0' && control_msg[1] != '1' ) ||
+                        ( control_msg[2] != '0' && control_msg[2] != '1' )
+                    )
                         GOTO_ERROR("received invalid 'o' message from control fd", control_error);
                     unsigned char binary = control_msg[1] - '0';
                     int lock = control_msg[2] - '0' + 2;
                     int size = *((uint32_t*)(control_msg + 3));
-                    // RH TODO do we want to check if the lock is already on the buffer?
-                    ws_buffer_lock[lock] = 1;
                     {
-                        unsigned char header[16];
+                        unsigned char buf[16];
                         buf[0] = 0b10000000 | binary;
                         if (size < 126) {
                             buf[1] = (char)(size);
@@ -668,17 +675,16 @@ int main(int argc, char **argv)
                             SSL_ENQUEUE(buf, 10);
                         }
                      
-                        // RH TODO: up to here
-                        // need to produce logic that writes the decoded ws frames into an available
-                        // ws_buffer and then when the fin frame is processed sends that buffer to
-                        // hpcore
-                        // and visa versa for right here    
-                        //SSL_ENQUEUE(ws_buffer
+                        SSL_ENQUEUE(ws_buffer[lock], size);
+                        buf[0] = 'a';
+                        buf[1] = '0' + lock - 2;
+                        if (send(control_fd, buf, 2, 0) != 2)
+                            GOTO_ERROR("could not send ack to control fd", control_error);
                     }
                     break;
-                    
-
-                    
+                default:
+                    fprintf(stderr, "unknown control message received `%*.s`\n", bytes_read, control_msg); 
+                    GOTO_ERROR("unknown control message", control_error); 
             }
             
         } 
@@ -750,14 +756,6 @@ int main(int argc, char **argv)
 
                         ws_bytes_received += ws_read_result;
 
-                        /*printf(
-                                "bytes_read: %d\n"
-                                "wait_for_bytes: %d\n"
-                                "state: %d\n"
-                                "offset: %d\n",
-
-                                ws_bytes_received, ws_wait_for_bytes, ws_state, ws_upto);
-                     */
                     }
 
                     //fprintf(stderr, "ws_state: %d\n", ws_state); 
@@ -851,7 +849,12 @@ int main(int argc, char **argv)
                         switch (ws_opcode) {
                             case 0: // continuation frame
                                 {
-
+                                    // RH TODO
+                                    // we need to change how we receive our bytes
+                                    // probably with a preliminary buffer of 14 bytes for the largest
+                                    // possible websocket frame
+                                    // and memcpying any spare payload out to the shared buffer when the
+                                    // header is parsed
                                     break;
                                 }
                             case 1: // text frame
