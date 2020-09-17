@@ -137,6 +137,19 @@ void configure_context(SSL_CTX *ctx, char* cert, char* key)
     }
 }
 
+int parse_int_or_exit(char* s, char* info) {
+    int n;
+    if (sscanf(s, "%d", &n) == 1)
+        return n;
+
+    if (info)
+        fprintf(stderr, "failed to parse integer argument for %s: `%s`\n", info, s);
+    else
+        fprintf(stderr, "failed to parse integer argument: `%s`\n", s);
+    
+    exit(1000);
+}
+
 int main(int argc, char **argv)
 {
 
@@ -145,28 +158,6 @@ int main(int argc, char **argv)
         fprintf(stderr, "%s\n", str);\
         exit(code);\
     }
-
-    int hpws_mode = 0;
-    {
-        int option_index = 0;
-        static struct option long_options[] = {
-            {"server", no_argument, 0,  0 },
-            {"client", no_argument, 0,  0 },
-            {0, 0,  0,  0 }
-        };
-        optind = 1;
-        while (getopt_long(argc, argv, "", long_options, &option_index) > -1)
-            hpws_mode |= (1<<option_index);
-    }
-
-    if (hpws_mode <= 0)
-        ABEND(1, "must specify either --client or --server");
-
-    if (hpws_mode >= 3)
-        ABEND(2, "cannot specify both --client and --server, pick only one");
-    
-    // mode 1 == server
-    // mode 2 == client
 
     // prepoulate defaults
     int ws_buffer_length = (16*1024*1024);
@@ -181,95 +172,78 @@ int main(int argc, char **argv)
     char host[256]; // this is the host as parsed from the cmdline when in client mode
     host[0] = '\0';   
  
+    int hpws_mode = 0;
+    
+
+    {
+        int option_index = 0;
+        optind = 1;
+        //opterr = 0;
+        static struct option long_options[] = {
+            {"server", no_argument, 0,  1 },
+            {"client", no_argument, 0,  1 },
+            {"maxmsg", required_argument, 0,  1 },
+            {"port", required_argument, 0,  1 },
+            {"cert", required_argument, 0,  1 },
+            {"key", required_argument, 0,  1 },
+            {"cntlfd", required_argument, 0,  1 },
+            {"maxcon", required_argument, 0,  1 },
+            {"maxconip", required_argument, 0,  1 },
+            
+            {0, 0,  0,  0 }
+        };
+        while (getopt_long_only(argc, argv, "", long_options, &option_index) != -1)
+        {
+            //    printf("processing option: %d-%s\n", option_index, long_options[option_index].name);
+            switch(option_index) {
+                case 0:
+                    hpws_mode |= 1;
+                    continue;
+                case 1:
+                    hpws_mode |= 2;
+                    continue;
+                case 2:
+                    ws_buffer_length = parse_int_or_exit(optarg, "maxmsg"); 
+                    continue;
+                case 3:
+                    port = parse_int_or_exit(optarg, "port");
+                    continue;
+                case 4:
+                    strcpy(cert, optarg);
+                    continue;
+                case 5:
+                    strcpy(key, optarg);
+                    continue;
+                case 6:
+                    control_fd = parse_int_or_exit(optarg, "cntlfd");
+                    continue;
+                case 7:
+                    max_con = parse_int_or_exit(optarg, "maxcon");
+                    continue;
+                case 8:
+                    max_con_ip = parse_int_or_exit(optarg, "maxconip");
+                    continue;
+                default:
+                    continue;
+            }
+        }
+    }
+
+    printf("hpws mode: %d\n", hpws_mode);
+    if (hpws_mode <= 0)
+        ABEND(1, "must specify either --client or --server");
+
+    if (hpws_mode >= 3)
+        ABEND(2, "cannot specify both --client and --server, pick only one");
+    
+    // mode 1 == server
+    // mode 2 == client
+
+    
+
     if (hpws_mode == 2) {
         // client
-
-        int option_index = 0;
-        static struct option long_options[] = {
-            {"--maxmsg", required_argument, 0,  0 },
-            {"--port", required_argument, 0,  0 },
-            {"--cert", required_argument, 0,  0 },
-            {"--key", required_argument, 0,  0 },
-            {"--cntlfd", required_argument, 0,  0 },
-            {"--host", required_argument, 0,  0 },
-            {"--client", no_argument, 0,  0 },
-            
-            {0, 0,  0,  0 }
-        };
-        optind = 1;
-        while (getopt_long(argc, argv, "", long_options, &option_index) > -1)
-        {
-            switch(option_index) {
-                case 0:
-                    ws_buffer_length = atoi(optarg); 
-                    break;
-                case 1:
-                    port = atoi(optarg);
-                    break;
-                case 2:
-                    strcpy(cert, optarg);
-                    break;
-                case 3:
-                    strcpy(key, optarg);
-                    break;
-                case 4:
-                    control_fd = atoi(optarg);
-                     break;
-                case 5:
-                    strcpy(host, optarg);
-                    break;
-                default:
-                    break;
-            }
-
-
             ABEND(1, "client mode not yet implemented sorry");
-        }
-    } else {
-        // server
-
-        int option_index = 0;
-        static struct option long_options[] = {
-            {"--maxmsg", required_argument, 0,  0 },
-            {"--port", required_argument, 0,  0 },
-            {"--cert", required_argument, 0,  0 },
-            {"--key", required_argument, 0,  0 },
-            {"--cntlfd", required_argument, 0,  0 },
-            {"--maxcon", required_argument, 0,  0 },
-            {"--maxconip", required_argument, 0,  0 },
-            {"--server", no_argument, 0,  0 },
-            
-            {0, 0,  0,  0 }
-        };
-        optind = 1;
-        while (getopt_long(argc, argv, "", long_options, &option_index) > -1)
-        {
-            switch(option_index) {
-                case 0:
-                    ws_buffer_length = atoi(optarg); 
-                    break;
-                case 1:
-                    port = atoi(optarg);
-                    break;
-                case 2:
-                    strcpy(cert, optarg);
-                    break;
-                case 3:
-                    strcpy(key, optarg);
-                    break;
-                case 4:
-                    control_fd = atoi(optarg);
-                     break;
-                case 5:
-                    max_con = atoi(optarg);
-                    break;
-                case 6:
-                    max_con_ip = atoi(optarg);
-                    break;
-                default:
-                    break;
-            }
-        }
     }
 
 
