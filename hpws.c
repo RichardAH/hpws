@@ -12,6 +12,7 @@
 #include <poll.h>
 #include <fcntl.h>
 #include <sys/mman.h>
+#include <getopt.h>
 
 // base64 from http://web.mit.edu/freebsd/head/contrib/wpa/src/utils/base64.c
 static const unsigned char base64_table[65] =
@@ -61,7 +62,7 @@ unsigned char * base64_encode(
 
 
 
-int create_socket(int port)
+int create_listen(int port)
 {
     int s;
     struct sockaddr_in addr;
@@ -120,17 +121,17 @@ SSL_CTX *create_context()
     return ctx;
 }
 
-void configure_context(SSL_CTX *ctx)
+void configure_context(SSL_CTX *ctx, char* cert, char* key)
 {
     SSL_CTX_set_ecdh_auto(ctx, 1);
 
     /* Set the key and cert */
-    if (SSL_CTX_use_certificate_file(ctx, "cert.pem", SSL_FILETYPE_PEM) <= 0) {
+    if (SSL_CTX_use_certificate_file(ctx, cert, SSL_FILETYPE_PEM) <= 0) {
         ERR_print_errors_fp(stderr);
 	exit(EXIT_FAILURE);
     }
 
-    if (SSL_CTX_use_PrivateKey_file(ctx, "key.pem", SSL_FILETYPE_PEM) <= 0 ) {
+    if (SSL_CTX_use_PrivateKey_file(ctx, key, SSL_FILETYPE_PEM) <= 0 ) {
         ERR_print_errors_fp(stderr);
 	exit(EXIT_FAILURE);
     }
@@ -138,33 +139,251 @@ void configure_context(SSL_CTX *ctx)
 
 int main(int argc, char **argv)
 {
-    struct sockaddr_in addr;
-    uint len = sizeof(addr);
 
-    // listen in an accept loop
-    int sock = create_socket(9001);
-    accept_loop:;
-    int client = accept(sock, (struct sockaddr*)&addr, &len);
-    if (client < 0) {
-        perror("Unable to accept");
-        exit(EXIT_FAILURE);
-    }
-    // todo: count clients / sub processes
-    if (fork()) {
-        close(client);
-        goto accept_loop;
+    #define ABEND(code, str)\
+    {\
+        fprintf(stderr, "%s\n", str);\
+        exit(code);\
     }
 
-    // fall through to this point in code indicates this is a child process
-    close(sock);
+    int hpws_mode = 0;
+    {
+        int option_index = 0;
+        static struct option long_options[] = {
+            {"server", no_argument, 0,  0 },
+            {"client", no_argument, 0,  0 },
+            {0, 0,  0,  0 }
+        };
+        optind = 1;
+        while (getopt_long(argc, argv, "", long_options, &option_index) > -1)
+            hpws_mode |= (1<<option_index);
+    }
+
+    if (hpws_mode <= 0)
+        ABEND(1, "must specify either --client or --server");
+
+    if (hpws_mode >= 3)
+        ABEND(2, "cannot specify both --client and --server, pick only one");
+    
+    // mode 1 == server
+    // mode 2 == client
+
+    // prepoulate defaults
+    int ws_buffer_length = (16*1024*1024);
+    int port = 443;
+    char cert[256];
+    strcpy(cert, "cert.pem");
+    char key[256];
+    strcpy(key, "key.pem");
+    int control_fd = -1; 
+    int max_con = 512;
+    int max_con_ip = 5;
+    char host[256]; // this is the host as parsed from the cmdline when in client mode
+    host[0] = '\0';   
+ 
+    if (hpws_mode == 2) {
+        // client
+
+        int option_index = 0;
+        static struct option long_options[] = {
+            {"--maxmsg", required_argument, 0,  0 },
+            {"--port", required_argument, 0,  0 },
+            {"--cert", required_argument, 0,  0 },
+            {"--key", required_argument, 0,  0 },
+            {"--cntlfd", required_argument, 0,  0 },
+            {"--host", required_argument, 0,  0 },
+            {"--client", no_argument, 0,  0 },
+            
+            {0, 0,  0,  0 }
+        };
+        optind = 1;
+        while (getopt_long(argc, argv, "", long_options, &option_index) > -1)
+        {
+            switch(option_index) {
+                case 0:
+                    ws_buffer_length = atoi(optarg); 
+                    break;
+                case 1:
+                    port = atoi(optarg);
+                    break;
+                case 2:
+                    strcpy(cert, optarg);
+                    break;
+                case 3:
+                    strcpy(key, optarg);
+                    break;
+                case 4:
+                    control_fd = atoi(optarg);
+                     break;
+                case 5:
+                    strcpy(host, optarg);
+                    break;
+                default:
+                    break;
+            }
 
 
-    printf("accepted connection\n");
+            ABEND(1, "client mode not yet implemented sorry");
+        }
+    } else {
+        // server
+
+        int option_index = 0;
+        static struct option long_options[] = {
+            {"--maxmsg", required_argument, 0,  0 },
+            {"--port", required_argument, 0,  0 },
+            {"--cert", required_argument, 0,  0 },
+            {"--key", required_argument, 0,  0 },
+            {"--cntlfd", required_argument, 0,  0 },
+            {"--maxcon", required_argument, 0,  0 },
+            {"--maxconip", required_argument, 0,  0 },
+            {"--server", no_argument, 0,  0 },
+            
+            {0, 0,  0,  0 }
+        };
+        optind = 1;
+        while (getopt_long(argc, argv, "", long_options, &option_index) > -1)
+        {
+            switch(option_index) {
+                case 0:
+                    ws_buffer_length = atoi(optarg); 
+                    break;
+                case 1:
+                    port = atoi(optarg);
+                    break;
+                case 2:
+                    strcpy(cert, optarg);
+                    break;
+                case 3:
+                    strcpy(key, optarg);
+                    break;
+                case 4:
+                    control_fd = atoi(optarg);
+                     break;
+                case 5:
+                    max_con = atoi(optarg);
+                    break;
+                case 6:
+                    max_con_ip = atoi(optarg);
+                    break;
+                default:
+                    break;
+            }
+        }
+    }
+
+
+    // todo options sanity checks 
+
+    if (control_fd < 0)
+        ABEND(5, "must supply a control FD --cntlfd <fd> as one side of a SOCK_SEQPACKET opened with socketpair");
+
+    int is_server = ( hpws_mode == 1 );
+
+
+    int client = -1;
+    struct sockaddr_in6 client_addr;
+    uint client_addr_len = sizeof(client_addr);
+
+    if (is_server) {
+
+        // RH todo: provide a way for listen loop (server) process to gracefully close and clean up fds
+        int master_control_fd = control_fd; // control_fd will become client's fd every loop so make a note of original
     
-    // 16 mib, but should be made configurable later
-    #define WS_BUFFER_LENGTH 16777216 
-    
-    char* ws_buffers[4];//WS_BUFFER_LENGTH];
+        // listen in an accept loop
+        int listen_sock = create_listen(9001);
+        for(;;) {
+
+            client = accept(listen_sock, (struct sockaddr*)&client_addr, &client_addr_len);
+            if (client < 0) {
+                perror("Unable to accept");
+                exit(EXIT_FAILURE);
+            }
+
+            // RH TODO process/ connection / ip counting here
+
+            // the instant we have done an accept we need to socketpair() and set up a new
+            // control fd for the child we about to fork(). once we have the pair we send
+            // one end to the child and one end down the master_control_fd
+            // then the server closes all ends it owns
+            int child_control_fd[2];
+            if (socketpair(AF_UNIX, SOCK_SEQPACKET, 0, child_control_fd)) {
+                //RH TODO should we kill off the proc here?
+                fprintf(stderr, "failed to create socketpair for new accept, closing connection\n");
+                close(client);
+                continue;
+            }
+                
+            // execution to here means we will service the client, send the socketpair fd
+            {
+                struct msghdr msg = { 0 };
+                struct cmsghdr *cmsg;
+                int send_fd[1] = {child_control_fd[1]} ;  /* Contains the file descriptors to pass */
+                char iobuf[1];
+                struct iovec io = {
+                    .iov_base = iobuf,
+                    .iov_len = sizeof(iobuf)
+                };
+                union {         /* Ancillary data buffer, wrapped in a union
+                                   in order to ensure it is suitably aligned */
+                    char buf[CMSG_SPACE(sizeof(send_fd))];
+                    struct cmsghdr align;
+                } u;
+
+                msg.msg_iov = &io;
+                msg.msg_iovlen = 1;
+                msg.msg_control = u.buf;
+                msg.msg_controllen = sizeof(u.buf);
+                cmsg = CMSG_FIRSTHDR(&msg);
+                cmsg->cmsg_level = SOL_SOCKET;
+                cmsg->cmsg_type = SCM_RIGHTS;
+                cmsg->cmsg_len = CMSG_LEN(sizeof(int));
+                memcpy(CMSG_DATA(cmsg), send_fd,  sizeof(int));
+
+                if (sendmsg(master_control_fd, &msg, 0) < 0)
+                {
+                    fprintf(stderr, "could not send control line fd for newly connected client down master control line");
+                    close(client);
+                    close(child_control_fd[0]);
+                    close(child_control_fd[1]);
+                    continue;
+                }    
+            }
+
+            // todo: count clients / sub processes
+            if (fork()) {
+                close(child_control_fd[0]);
+                close(child_control_fd[1]);
+                close(client);
+                continue;
+            }
+            
+            // fall through to this point in code indicates this is a child process
+            close(child_control_fd[1]);
+            control_fd = child_control_fd[0];
+            close(listen_sock);
+            break;
+        }
+    } else {
+
+        // RH TODO client = connect (....)
+        fprintf(stderr, "client connect not implemented\n");
+        exit(10);
+    }
+
+    // once we fall through to this point in execution the program is the same for
+    // 1) a connected client that was just accept()ed
+    // 2) a connected client that was just connect()ed
+    // the control_fd messages are the same, the buffers are the same and the proxy is the same
+
+    // first thing the new client always does is send its address to the control line
+    if (send(control_fd, (void*)&client_addr, sizeof(client_addr), 0) != sizeof(client_addr))
+        ABEND(6, "could not send client_addr to control fd");
+
+    printf("connection established\n");
+
+         
+    char* ws_buffers[4];//ws_buffer_length];
 
 
     // rotating (swapping) buffers in and out
@@ -174,34 +393,63 @@ int main(int argc, char **argv)
     // 3. the buffer being written to will only be handed to the other process
     //    when the buffer being read from is handed back 
     //    this is so there is always a buffer to write into
-    int ws_buf_fd[] = {
+    int ws_buffer_fd[] = {
         memfd_create("hpws_to_core_1", 0),
         memfd_create("hpws_to_core_2", 0),
         memfd_create("core_to_hpws_1", 0),
         memfd_create("core_to_hpws_2", 0)
     };
-
-
+    
     for (int i = 0; i < 4; ++i) {
-        if (ws_buf_fd[i] < 0) {
+        if (ws_buffer_fd[i] < 0) {
             perror("failed to create memfd\n");
             close(client);
             return 1;
         }
-        if (ftruncate(ws_buf_fd[i], WS_BUFFER_LENGTH)) {
+        if (ftruncate(ws_buffer_fd[i], ws_buffer_length)) {
             perror("could not ftruncate memfd\n");
             close(client);
             return 1;
         }
-        void* mapping = mmap(NULL, WS_BUFFER_LENGTH, PROT_WRITE | PROT_READ, MAP_SHARED, ws_buf_fd[i], 0);
+        void* mapping = mmap(NULL, ws_buffer_length, PROT_WRITE | PROT_READ, MAP_SHARED, ws_buffer_fd[i], 0);
         if (mapping == (void*)-1) {
             perror("failed to mmap memfd\n");
             close(client);
             return 1;
         }
         ws_buffers[i] = mapping;
-        printf("fd %d: %d - %x\n", i, ws_buf_fd[i], mapping);   
+        printf("fd %d: %d - %x\n", i, ws_buffer_fd[i], mapping);   
     }
+
+    // second thing the new client does is send its buffer fd's to the control line
+    {
+        struct msghdr msg = { 0 };
+        struct cmsghdr *cmsg;
+        char iobuf[1];
+        struct iovec io = {
+            .iov_base = iobuf,
+            .iov_len = sizeof(iobuf)
+        };
+        union {         /* Ancillary data buffer, wrapped in a union
+                           in order to ensure it is suitably aligned */
+            char buf[CMSG_SPACE(sizeof(ws_buffer_fd))];
+            struct cmsghdr align;
+        } u;
+
+        msg.msg_iov = &io;
+        msg.msg_iovlen = 1;
+        msg.msg_control = u.buf;
+        msg.msg_controllen = sizeof(u.buf);
+        cmsg = CMSG_FIRSTHDR(&msg);
+        cmsg->cmsg_level = SOL_SOCKET;
+        cmsg->cmsg_type = SCM_RIGHTS;
+        cmsg->cmsg_len = CMSG_LEN(sizeof(int) * 4);
+        memcpy(CMSG_DATA(cmsg), ws_buffer_fd, 4 * sizeof(int));
+
+        if (sendmsg(control_fd, &msg, 0) < 0)
+            ABEND(7, "could not send buffer fds down control line");
+    }
+
 
     //todo: - limit ssl_read to the size of the current ws frame to avoid reading in part of the  next frame
     //      - SCM_RIGHTS
@@ -219,7 +467,7 @@ int main(int argc, char **argv)
     SSL_CTX *ctx;
     init_openssl();
     ctx = create_context();
-    configure_context(ctx);
+    configure_context(ctx, cert, key);
     ssl = SSL_new(ctx);
 
 
@@ -416,7 +664,7 @@ int main(int argc, char **argv)
                         // we do one single read when the ws hasn't protocol upgraded yet
                     
                         // todo: should we loop to ensure a complete http request?
-                        int bytes_read = SSL_read( ssl, ws_buf_decode, WS_BUFFER_LENGTH - 1 );
+                        int bytes_read = SSL_read( ssl, ws_buf_decode, ws_buffer_length - 1 );
                         fprintf(stderr, "--bytes read: %d\n", bytes_read); 
                         
                         if (bytes_read <= 0)
@@ -428,7 +676,7 @@ int main(int argc, char **argv)
                     } else {
 
                         ws_read_result = 
-                            SSL_read( ssl, ws_buf_decode + ws_bytes_received, WS_BUFFER_LENGTH - ws_bytes_received - 8 );
+                            SSL_read( ssl, ws_buf_decode + ws_bytes_received, ws_buffer_length - ws_bytes_received - 8 );
 
                         if (ws_read_result <= 0)
                             goto skip_ws;
@@ -469,14 +717,14 @@ int main(int argc, char **argv)
 
                             // clear any linear whitespace at the start of the field
                             for (; (*found == ' ' || *found == '\t') &&
-                                    found < ws_buf_decode + WS_BUFFER_LENGTH; ++found);
+                                    found < ws_buf_decode + ws_buffer_length; ++found);
 
                             // clear any linear whitespace at the end of the field
                             for (; (*lineend == ' ' || *lineend == '\t') &&
                                     lineend > found; --lineend);
 
                             // now concatenate our magic string to the end if there is space
-                            if ( WS_BUFFER_LENGTH - ( lineend - ws_buf_decode ) <= sizeof(magic_string) )
+                            if ( ws_buffer_length - ( lineend - ws_buf_decode ) <= sizeof(magic_string) )
                                 GOTO_ERROR("unable to conat magic string during ws handshake", ws_handshake_error);
 
                             strcpy( lineend, magic_string );
@@ -491,7 +739,7 @@ int main(int argc, char **argv)
                                 GOTO_ERROR("base64 encode failed", ws_handshake_error);
 
                             // write a repsonse 
-                            int bytes_to_write = snprintf(ws_buf_decode, WS_BUFFER_LENGTH, 
+                            int bytes_to_write = snprintf(ws_buf_decode, ws_buffer_length, 
                                 "HTTP/1.1 101 Switching Protocols\r\n"
                                 "Upgrade: websocket\r\n"
                                 "Connection: Upgrade\r\n"
@@ -691,8 +939,13 @@ int main(int argc, char **argv)
     ssl_error:;
     client_closed:;
 
-    printf("finished\n");
+    printf("finished %d\n", getpid());
     close(client);
+    close(control_fd);
+    for (int i = 0; i < 4; ++i)
+        if (ws_buffer_fd[i] > -1)
+            close(ws_buffer_fd[i]);
+
     SSL_free(ssl);
     free(ssl_write_buf);
     free(ssl_encrypt_buf);
