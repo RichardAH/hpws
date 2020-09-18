@@ -5,19 +5,6 @@
 
 int main() {
 
-/*    
-        static std::variant<server, error> create(
-            std::string_view bin_path,
-            uint32_t max_buffer_size,
-            uint16_t port,
-            uint32_t max_con,
-            uint16_t max_con_per_ip,
-            std::string_view cert_path,
-            std::string_view key_path,
-            std::vector<std::string_view>& argv //additional_arguments 
-        ){
-*/
-
     #define PRINT_HPWS_ERROR(obj)\
     {\
         if (std::holds_alternative<hpws::error>(obj)) {\
@@ -30,6 +17,7 @@ int main() {
     if ( std::holds_alternative<hpws::server>(server) ) {
         printf("we got a server\n");
 
+        while (1) {
         auto accept_result = std::get<hpws::server>(server).accept();
 
         if (std::holds_alternative<hpws::client>(accept_result)) {
@@ -44,13 +32,15 @@ int main() {
             auto read_result = client.read();
             if ( std::holds_alternative<hpws::error>(read_result) ) {
                 PRINT_HPWS_ERROR(read_result);
-                return 1;
+                //return 1;
+                break;
             }
 
             std::string_view s = std::get<std::string_view>(read_result);
             printf("got message from hpws: `%.*s`\n", s.size(), s.data());
             
             client.ack(s);    
+        }
         }
 
     } else if ( std::holds_alternative<hpws::error>(server) )  {

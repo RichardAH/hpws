@@ -525,7 +525,7 @@ int main(int argc, char **argv)
     uint64_t ws_payload_bytes_expected = 0;
     int ws_sent_close_frame = 0, ws_received_close_frame = 0,
         ws_payload_upto = 0, ws_preliminary_size = 0, ws_read_result = 0,
-        ws_back_read = 0, ws_pending_read = 0;
+        ws_back_read = 0, ws_header_back_read = 0, ws_pending_read = 0;
 
     int ws_bytes_received = 0;
 
@@ -586,13 +586,17 @@ int main(int argc, char **argv)
                     GOTO_ERROR("control ordered close", force_closed);
                     break;
                 case 'a': // ack, we can unlock the specified buffer
+                    {
                     if (bytes_read != 2 || ( control_msg[1] != '0' && control_msg[1] != '1' ))
                         GOTO_ERROR("received invalid 'c' message from control fd", control_error);
+
+                    printf("received ack for buffer %c\n", control_msg[1]);
 
                     int unlock = control_msg[1] - '0';
                     ws_buffer_lock[unlock] = 0;
                     if (ws_buf_decode == NULL)
                         ws_buf_decode =  ws_buffer[unlock]; 
+                    }
                     break;
 
                 case 'o': // outgoing frame on buffer x, of size y
@@ -646,7 +650,7 @@ int main(int argc, char **argv)
             
         } 
 
-
+        printf("---  ws pending = %d, ws_buf_decode = %x\n", ws_pending_read, ws_buf_decode);
         // end control line events
 
         
@@ -664,32 +668,33 @@ int main(int argc, char **argv)
         }
 
         // INCOMING DATA
+        //int it = ( ws_pending_read + ( fdset[0].revents & POLLIN != 0 ) );
         if (fdset[0].revents & POLLIN || ws_pending_read) {
-            
-            bytes_read = read(client, ssl_buf, sizeof(ssl_buf));
-            /*fprintf(stderr, "raw bytes read %ld\nrawbytes:`", bytes_read);
-            fwrite(ssl_buf, 1, bytes_read, stderr);
-            fprintf(stderr, "`\n");*/
-            if (bytes_read <= 0) {
-                if (ws_pending_read)
-                    goto skip_ssl;
-                GOTO_ERROR("client closed connection", client_closed);
+            printf("incoming data\n");           
+ 
+            if (fdset[0].revents & POLLIN)
+            {
+                bytes_read = read(client, ssl_buf, sizeof(ssl_buf));
+                /*fprintf(stderr, "raw bytes read %ld\nrawbytes:`", bytes_read);
+                fwrite(ssl_buf, 1, bytes_read, stderr);
+                fprintf(stderr, "`\n");*/
+                if (bytes_read <= 0) {
+                    GOTO_ERROR("client closed connection", client_closed);
+                }
+                bytes_written = BIO_write(rbio, ssl_buf, bytes_read);
+                if (bytes_written <= 0)
+                    GOTO_ERROR("could not write raw bytes to openssl from incoming socket", ssl_error);
+                   
+                if ( !SSL_is_init_finished(ssl) ) {
+                    int n = SSL_do_handshake(ssl);
+                    int e = SSL_get_error(ssl, n);
+                    SSL_FLUSH_OUT()
+
+                    char buf[1] = { 'r' }; // send 'ready' message
+                    if (send(control_fd, buf, 1, 0) != 1)
+                        GOTO_ERROR("could not write ready message to control fd", control_error);
+                } 
             }
-            bytes_written = BIO_write(rbio, ssl_buf, bytes_read);
-            if (bytes_written <= 0)
-                GOTO_ERROR("could not write raw bytes to openssl from incoming socket", ssl_error);
-               
-            if ( !SSL_is_init_finished(ssl) ) {
-                int n = SSL_do_handshake(ssl);
-                int e = SSL_get_error(ssl, n);
-                SSL_FLUSH_OUT()
-
-                char buf[1] = { 'r' }; // send 'ready' message
-                if (send(control_fd, buf, 1, 0) != 1)
-                    GOTO_ERROR("could not write ready message to control fd", control_error);
-            } 
-
-            skip_ssl:;
 
             if (SSL_is_init_finished(ssl)){
 
@@ -743,12 +748,14 @@ int main(int argc, char **argv)
                 char ws_buf_header[14]; // largest header is 14
 
                 for (;;) {
-                    printf("ws_state : %d\n", ws_state);
+
+                    
                     if (ws_buf_decode == NULL) {
                         ws_pending_read = 1;
                         printf("skipping websocket  read because there are no free buffers\n");
                         goto skip_ws;
                     }
+                    printf("entering ws loop\n");
 
                     if ( ws_state == 0 ) {
                         // we do one single read when the ws hasn't protocol upgraded yet
@@ -770,17 +777,25 @@ int main(int argc, char **argv)
                             WS_PROTOCOL_ERROR( "tried to read beyond 14 bytes of header" );
 
                         ws_read_result = 
-                            SSL_read( ssl, ws_buf_header + ws_bytes_received, sizeof(ws_buf_header) - ws_bytes_received );
+                            SSL_read( ssl,
+                                ws_buf_header + ws_bytes_received + ws_header_back_read,
+                                sizeof(ws_buf_header) - ws_bytes_received - ws_header_back_read );
                         
-                        printf("bytes read : %d\n",  ws_read_result);
                         
-                        if (ws_read_result <= 0)
-                            goto skip_ws;
+                        if (ws_read_result <= 0) {
+                            if (!ws_header_back_read)
+                                goto skip_ws;
+                            ws_read_result = 0;
+                        }
+
+                        if (ws_header_back_read) {
+                            ws_read_result += ws_header_back_read;
+                            ws_header_back_read = 0;
+                        }
 
                         ws_bytes_received += ws_read_result;
                         
                     } else {
-
 
                         ws_pending_read = 0;
 
@@ -793,11 +808,11 @@ int main(int argc, char **argv)
                         
                         if (ws_payload_bytes_remaining > buffer_bytes_left)
                             WS_PROTOCOL_ERROR( "payload message exceeded maximum messagesize" ) ; // RH TODO make this a ws maxsize error 
-                        
+
                         ws_read_result =
                             SSL_read( ssl, ws_buf_decode + ws_bytes_received + ws_payload_upto + ws_back_read, ws_payload_bytes_remaining );
 
-                        printf("bytes read : %d --  ws_payload_upto:  %d \n",  ws_read_result, ws_payload_upto);
+// --  ws_payload_upto:  %d \n",  ws_read_result, ws_payload_upto);
 
                         if (ws_read_result <= 0) {
                             if (!ws_back_read)
@@ -809,8 +824,26 @@ int main(int argc, char **argv)
                             ws_read_result += ws_back_read;
                             ws_back_read = 0;
                         }
-                
+                        
+                        printf("== bytes read : %d\n== payload_bytes_remaining: %d\n"
+                            , ws_read_result, ws_payload_bytes_remaining );
+               
+                        // there can be overshoot due to backread, so in this scenario we copy back into header buf
+                        if ( ws_payload_bytes_remaining < ws_read_result ) {
+                            int spare_header_bytes =  ( ws_read_result - ws_payload_bytes_remaining );
+                            printf("== copying spare header bytes %d\n", spare_header_bytes);
+                            if (spare_header_bytes > 14)
+                                // this should never happen but catch it incase some bug makes it happen
+                                WS_PROTOCOL_ERROR( "could not back-backcopy header bytes from decode buffer, header bytes too long");
+                            memcpy( ws_buf_header,
+                                    ws_buf_decode + ws_bytes_received + ws_payload_upto + ws_payload_bytes_remaining,
+                                    spare_header_bytes );  
+                            ws_read_result = ws_payload_bytes_remaining;
 
+                            ws_header_back_read = spare_header_bytes;
+                        }
+ 
+                        uint64_t key_offset = ws_bytes_received % 4;
                         ws_bytes_received += ws_read_result;
                             
                         uint64_t ws_payload_next = ws_bytes_received + ws_payload_upto;
@@ -820,33 +853,39 @@ int main(int argc, char **argv)
                             ws_payload_next = ws_payload_bytes_remaining + ws_payload_upto;
                             ws_state = 4;
                         }          
+
+                        printf("masking key loop:  %08X, %d - %d, ws_bytes_received: %d\n",
+                            (*(uint32_t*)(ws_masking_key)),ws_payload_upto,ws_payload_next, ws_bytes_received);
     
                         // this is an extremely tight loop, we dont want unnecessary condition checking in it
                         for (uint64_t i = ws_payload_upto; i < ws_payload_next ; i += 8)
                             *(uint64_t*)(ws_buf_decode + i) ^=
-                                *((uint64_t*)(ws_masking_key + ( ws_payload_upto % 4)));
+                                *((uint64_t*)(ws_masking_key + key_offset));
                         
                         // to keep the above loop tight we'll handle the edge case were we xor'd past the end
                         for (uint64_t i = ws_payload_next; i < ws_payload_next + (ws_payload_next % 8); ++i) 
-                            ws_buf_decode[i] ^= ws_masking_key_raw[ (ws_payload_upto + i) % 4 ];
+                            ws_buf_decode[i] ^= ws_masking_key_raw[ (key_offset + i) % 4 ];
                         
-
-                        //for (uint64_t i = ws_payload_upto; i < ws_payload_next; ++i)
-                        //    ws_buf_decode[i] ^= ws_masking_key[ ( i  - ws_payload_upto ) % 4 ];
-
-                        printf("bytes received: `%.*s`\n", ws_read_result, ws_buf_decode+ ws_payload_upto);
-            
                         if (ws_state == 4) 
                         {
                             
                             ws_payload_upto += ws_bytes_received;
+                            
                             if (ws_fin) {
                                 // final frame in the fragment so we need to send a control line msg and swap buffers
                                 static int line = 0;
-                                printf("%05d: %02d/%02d - %d offset: %d packet: `%.*s`\n", 
-                                        line++, ws_payload_bytes_remaining, ws_payload_bytes_expected, 
-                                        ws_fin, ws_payload_upto, 
-                                        (int)ws_payload_upto, ws_buf_decode);
+                                printf(
+                                        "%05d: %02d/%02d - %d offset: %d packet: `%.*s`\n", 
+                                        line++,
+                                        ws_payload_bytes_remaining,
+                                        ws_payload_bytes_expected, 
+                                        ws_fin,
+                                        ws_payload_bytes_expected, 
+                                        (int)ws_payload_bytes_expected,
+                                        ws_buf_decode
+                                );
+
+                                printf("extra bytes: %d\n", ws_payload_upto - ws_payload_bytes_expected );
 
                                 int sending_buf = ( ws_buf_decode == ws_buffer[0] ? 0 : 1 );
                 
@@ -875,7 +914,6 @@ int main(int argc, char **argv)
                     }
 
 
-                    //fprintf(stderr, "ws_state: %d\n", ws_state); 
                     if ( !( ws_state < 3 && ws_bytes_received < ws_wait_for_bytes) )
                     switch ( ws_state )
                     {
@@ -962,7 +1000,8 @@ int main(int argc, char **argv)
                         // parse size
                         ws_preliminary_size = ws_buf_header[1] & 0b01111111;
 
-                        printf("ws header: ws_opcode %d ws_fin %d ws_preliminary_size %d\n", ws_opcode, ws_fin,  ws_preliminary_size );
+                        printf("ws header: bytes_read %d ws_opcode %d ws_fin %d ws_preliminary_size %d\n",
+                                ws_bytes_received, ws_opcode, ws_fin,  ws_preliminary_size );
 
                         //printf("opcode: %d\n", ws_opcode);
                         switch (ws_opcode) {
@@ -1025,7 +1064,9 @@ int main(int argc, char **argv)
                                 ws_payload_bytes_expected = ws_preliminary_size;
                                 WS_STORE_MASKING_KEY(ws_masking_key_raw, ws_buf_header, 2);
                                 header_size = 6; 
-                            }           
+                            }          
+
+                            printf("payload bytes expected:  %d\n",ws_payload_bytes_expected); 
 
                             // memcpy unused or extra header bytes (which are actually payload) into ws_buf_decode
                             if (ws_bytes_received > header_size) {
@@ -1047,10 +1088,10 @@ int main(int argc, char **argv)
                     
                     SSL_FLUSH_OUT()
                 }
-            }
+            };
+            skip_ws:;
         }
 
-        skip_ws:
         // encrypt pending ssl queue
         if (!SSL_is_init_finished(ssl))
             continue;

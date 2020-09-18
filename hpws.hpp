@@ -54,7 +54,6 @@ namespace hpws {
             max_buffer_size (max_buffer_size),
             child_pid(child_pid)
         {
-            printf("client constructed with control line fd: %d\n",  control_line_fd);
             for (int i = 0; i < 4; ++i) {
                 this->buffer[i] = buffer[i];
                 this->buffer_fd[i] = buffer_fd[i];
@@ -81,7 +80,6 @@ namespace hpws {
                 this->buffer[i] = old.buffer[i];
                 this->buffer_fd[i] = old.buffer_fd[i];
             }
-            printf("client moved with control line fd: %d\n",  control_line_fd);
         }
 
         ~client() {
@@ -107,7 +105,6 @@ namespace hpws {
             int bytes_read = 0;
 
             read_start:;
-            printf("control  line fd: %d\n",control_line_fd);            
             bytes_read = recv(control_line_fd, buf, sizeof(buf), 0);
             if (bytes_read < 1)  {
                 perror("recv");
@@ -148,6 +145,7 @@ namespace hpws {
         std::optional<error> ack(std::string_view from_read)  {
             char msg[2] = { 'a', '0' };
             if (from_read.data() == buffer[1]) msg[1]++;
+            printf("sending ack for buffer %c\n", msg[1]);
             if (send(control_line_fd, msg, 2, 0) < 2)
                 return error { 10, "could not send ack down control line"};
             return std::nullopt;
