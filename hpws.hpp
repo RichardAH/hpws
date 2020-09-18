@@ -135,6 +135,7 @@ namespace hpws {
                 case 'a':
                     break;
                 case 'c':
+                    return error { 1000, "ws closed" };
                     break;
                 default:
                     printf("read control message: `%.*s`\n",  bytes_read, buf);
@@ -145,7 +146,6 @@ namespace hpws {
         std::optional<error> ack(std::string_view from_read)  {
             char msg[2] = { 'a', '0' };
             if (from_read.data() == buffer[1]) msg[1]++;
-            printf("sending ack for buffer %c\n", msg[1]);
             if (send(control_line_fd, msg, 2, 0) < 2)
                 return error { 10, "could not send ack down control line"};
             return std::nullopt;

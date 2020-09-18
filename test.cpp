@@ -37,7 +37,8 @@ int main() {
             }
 
             std::string_view s = std::get<std::string_view>(read_result);
-            printf("got message from hpws: `%.*s`\n", s.size(), s.data());
+            //printf("got message from hpws: `%.*s`\n", s.size(), s.data());
+            printf("%.*s", s.size(), s.data());
             
             client.ack(s);    
         }
