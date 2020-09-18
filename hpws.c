@@ -14,7 +14,8 @@
 #include <sys/mman.h>
 #include <getopt.h>
 
-#define DEBUG 0
+//#define DEBUG 0
+#define DEBUG 1
 
 // base64 from http://web.mit.edu/freebsd/head/contrib/wpa/src/utils/base64.c
 static const unsigned char base64_table[65] =
@@ -551,9 +552,6 @@ int main(int argc, char **argv)
       
         int ready = poll(&fdset[0], 2, -1);
 
-        if (DEBUG)
-            printf("ready? %ld, sslwritelen %ld\n", ready, ssl_write_len);
-
         if (!ready)
             continue;
 
@@ -660,8 +658,8 @@ int main(int argc, char **argv)
 
         // end control line events
         
-        if (DEBUG)
-            printf("---  ws pending = %d, ws_buf_decode = %x\n", ws_pending_read, ws_buf_decode);
+        //if (DEBUG)
+        //    printf("---  ws pending = %d, ws_buf_decode = %x\n", ws_pending_read, ws_buf_decode);
 
         
         // OUTGOING DATA
@@ -681,8 +679,8 @@ int main(int argc, char **argv)
         // INCOMING DATA
         //int it = ( ws_pending_read + ( fdset[0].revents & POLLIN != 0 ) );
         if (fdset[0].revents & POLLIN || ws_pending_read) {
-            if (DEBUG)
-                printf("incoming data\n");           
+            //if (DEBUG)
+            //    printf("incoming data\n");           
  
             if (fdset[0].revents & POLLIN)
             {
@@ -867,16 +865,18 @@ int main(int argc, char **argv)
                         uint64_t key_offset = ws_bytes_received % 4;
                         ws_bytes_received += ws_read_result;
                             
-                        uint64_t ws_payload_next = ws_bytes_received + ws_payload_upto;
+                        uint64_t ws_payload_next = ws_read_result + ws_payload_upto;
                         
 
-                        if (ws_bytes_received >= ws_payload_bytes_remaining) {
+                        if (ws_read_result >= ws_payload_bytes_remaining) {
+                            if (DEBUG)
+                                printf("[[PATH 1]]\n");
                             ws_payload_next = ws_payload_bytes_remaining + ws_payload_upto;
                             ws_state = 4;
                         }          
 
                         if (DEBUG)
-                            printf("masking key loop:  %08X, %d - %d, ws_bytes_received: %d\n",
+                            printf("masking key loop:  %08X, %d - %d, (total)ws_bytes_received: %d\n",
                                 (*(uint32_t*)(ws_masking_key)),ws_payload_upto,
                                 ws_payload_next, ws_bytes_received);
     
@@ -892,30 +892,34 @@ int main(int argc, char **argv)
                         if (ws_state == 4) 
                         {
                             
-                            ws_payload_upto += ws_bytes_received;
                             
                             if (ws_fin) {
                                 // final frame in the fragment so we need to send a control line msg and swap buffers
                                 if (DEBUG) {
                                     static int line = 0;
+                                    int to_print = 20;
+                                    if ((int)ws_payload_bytes_expected < to_print)
+                                        to_print = (int)ws_payload_bytes_expected;
                                     printf(
-                                            "%05d: %02d/%02d - %d offset: %d packet: `%.*s`\n", 
+                                            "(%05d: %02d/%02d - %d offset: %d packet: `%.*s`%s\n", 
                                             line++,
                                             ws_payload_bytes_remaining,
                                             ws_payload_bytes_expected, 
                                             ws_fin,
                                             ws_payload_bytes_expected, 
-                                            (int)ws_payload_bytes_expected,
-                                            ws_buf_decode
+                                            to_print,
+                                            ws_buf_decode,
+                                            ( ((int)ws_payload_bytes_expected < to_print) ? "": "..." )
                                     );
 
-                                    printf("extra bytes: %d\n", ws_payload_upto - ws_payload_bytes_expected );
                                 }
 
                                 int sending_buf = ( ws_buf_decode == ws_buffer[0] ? 0 : 1 );
                 
                                 char control_msg[6] = { 'o', '0' + sending_buf, 0, 0, 0, 0 };
-                                *((uint32_t*)(control_msg+2)) = ws_payload_upto;
+                                *((uint32_t*)(control_msg+2)) = ws_payload_next;
+
+                                printf("sending o msg len: %d\n", ws_payload_next);
 
                                 send(control_fd, control_msg, 6, 0);
                                 // do the buffer swap
@@ -996,7 +1000,6 @@ int main(int argc, char **argv)
                             SSL_ENQUEUE(ws_buf_decode, bytes_to_write);
                                                    
                             ++ws_state;
-                            WS_SEND_TEXT_FRAME("hello world!\n");
 
                             break; 
                         }
@@ -1084,7 +1087,8 @@ int main(int argc, char **argv)
                                 ws_payload_bytes_expected=  
                                     ((uint64_t)ws_buf_header[2] << 8) + ((uint64_t)ws_buf_header[3] << 0);
                                 WS_STORE_MASKING_KEY(ws_masking_key_raw, ws_buf_header, 4);
-                                printf("ws_payload_bytes_expected %lu\n", ws_payload_bytes_expected);
+                                if (DEBUG)
+                                    printf("ws_payload_bytes_expected %lu\n", ws_payload_bytes_expected);
                                 header_size = 8; 
                             } else if (ws_preliminary_size == 127) {
                                 if (DEBUG)
