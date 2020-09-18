@@ -522,9 +522,10 @@ int main(int argc, char **argv)
     int ws_wait_for_bytes = 0;
     char ws_masking_key_raw[12];
     uint64_t* ws_masking_key = (uint64_t*)(ws_masking_key_raw);
-    uint64_t ws_payload_bytes_processed = 0, ws_payload_bytes_expected = 0;
+    uint64_t ws_payload_bytes_expected = 0;
     int ws_sent_close_frame = 0, ws_received_close_frame = 0,
-        ws_payload_upto = 0, ws_preliminary_size = 0, ws_read_result = 0;
+        ws_payload_upto = 0, ws_preliminary_size = 0, ws_read_result = 0,
+        ws_back_read = 0;
 
     int ws_bytes_received = 0;
 
@@ -694,6 +695,7 @@ int main(int argc, char **argv)
 
                 #define WS_STORE_MASKING_KEY( masking_key_raw, buf, o )\
                 {\
+                    printf("storing masking key %08X\n", *((uint32_t*)(&buf[o])));\
                     for (int i = 0; i < 12; ++i)\
                         masking_key_raw[i] = buf[ o + (i % 4)];\
                 }
@@ -735,6 +737,7 @@ int main(int argc, char **argv)
                 char ws_buf_header[14]; // largest header is 14
 
                 for (;;) {
+                    printf("ws_state : %d\n", ws_state);
                     if ( ws_state == 0 ) {
                         // we do one single read when the ws hasn't protocol upgraded yet
                     
@@ -748,7 +751,7 @@ int main(int argc, char **argv)
                         ws_buf_decode[bytes_read-1] = '\0';
 
 
-                    } else if ( ws_state < 3  ) {
+                    } else if ( ws_state < 3 ) {
 
                         // read into header
                         if (ws_bytes_received >= sizeof(ws_buf_header))
@@ -756,6 +759,8 @@ int main(int argc, char **argv)
 
                         ws_read_result = 
                             SSL_read( ssl, ws_buf_header + ws_bytes_received, sizeof(ws_buf_header) - ws_bytes_received );
+                        
+                        printf("bytes read : %d\n",  ws_read_result);
                         
                         if (ws_read_result <= 0)
                             goto skip_ws;
@@ -765,25 +770,36 @@ int main(int argc, char **argv)
                     } else {
 
                         uint64_t ws_payload_bytes_remaining =
-                            ws_payload_bytes_expected - ws_payload_bytes_processed;
+                            ws_payload_bytes_expected - ws_payload_upto;
                         
                         // read into decode buffer
-                        int buffer_bytes_left = ws_buffer_length - ws_bytes_received - ws_payload_upto - 8;
+                        int buffer_bytes_left = ws_buffer_length - ws_bytes_received - ws_payload_upto - 8 - ws_back_read;
+                        printf("payload bytes remaining: %d buffer_bytes_left: %d\n", ws_payload_bytes_remaining, buffer_bytes_left);
+                        
                         if (ws_payload_bytes_remaining > buffer_bytes_left)
                             WS_PROTOCOL_ERROR( "payload message exceeded maximum messagesize" ) ; // RH TODO make this a ws maxsize error 
+                        
+                        ws_read_result =
+                            SSL_read( ssl, ws_buf_decode + ws_bytes_received + ws_payload_upto + ws_back_read, ws_payload_bytes_remaining );
 
-                        ws_read_result = 
-                            SSL_read( ssl, ws_buf_decode + ws_bytes_received + ws_payload_upto, ws_payload_bytes_remaining );
+                        printf("bytes read : %d --  ws_payload_upto:  %d \n",  ws_read_result, ws_payload_upto);
 
-                        if (ws_read_result <= 0)
-                            goto skip_ws;
+                        if (ws_read_result <= 0) {
+                            if (!ws_back_read)
+                                goto skip_ws;
+                            ws_read_result = 0;
+                        }
+
+                        if (ws_back_read) {
+                            ws_read_result += ws_back_read;
+                            ws_back_read = 0;
+                        }
+                
 
                         ws_bytes_received += ws_read_result;
                             
                         uint64_t ws_payload_next = ws_bytes_received + ws_payload_upto;
                         
-                        //printf("bytes_remaining: %d\nbytes_expected: %d\nbytes_processed: %d\n", 
-                        //    ws_payload_bytes_remaining, ws_payload_bytes_expected, ws_payload_bytes_processed);                
 
                         if (ws_bytes_received >= ws_payload_bytes_remaining) {
                             ws_payload_next = ws_payload_bytes_remaining + ws_payload_upto;
@@ -793,13 +809,17 @@ int main(int argc, char **argv)
                         // this is an extremely tight loop, we dont want unnecessary condition checking in it
                         for (uint64_t i = ws_payload_upto; i < ws_payload_next ; i += 8)
                             *(uint64_t*)(ws_buf_decode + i) ^=
-                                *((uint64_t*)(ws_masking_key + (ws_payload_bytes_processed % 4)));
+                                *((uint64_t*)(ws_masking_key + ( ws_payload_upto % 4)));
                         
                         // to keep the above loop tight we'll handle the edge case were we xor'd past the end
                         for (uint64_t i = ws_payload_next; i < ws_payload_next + (ws_payload_next % 8); ++i) 
-                            ws_buf_decode[i] ^= ws_masking_key_raw[ (ws_payload_bytes_processed + i) % 4 ];
+                            ws_buf_decode[i] ^= ws_masking_key_raw[ (ws_payload_upto + i) % 4 ];
+                        
 
+                        //for (uint64_t i = ws_payload_upto; i < ws_payload_next; ++i)
+                        //    ws_buf_decode[i] ^= ws_masking_key[ ( i  - ws_payload_upto ) % 4 ];
 
+                        printf("bytes received: `%.*s`\n", ws_read_result, ws_buf_decode+ ws_payload_upto);
             
                         if (ws_state == 4) 
                         {
@@ -818,11 +838,7 @@ int main(int argc, char **argv)
     
                             ws_bytes_received = 0;
                             ws_state = 1;
-                            ws_payload_bytes_processed = 0;
-                            ws_payload_bytes_remaining = 0;
                         } else { 
-                        
-                            ws_payload_bytes_processed += (ws_payload_next - ws_payload_upto);
                             ws_payload_upto = ws_payload_next;
                         }
                     }
@@ -915,6 +931,8 @@ int main(int argc, char **argv)
                         // parse size
                         ws_preliminary_size = ws_buf_header[1] & 0b01111111;
 
+                        printf("ws header: ws_opcode %d ws_fin %d ws_preliminary_size %d\n", ws_opcode, ws_fin,  ws_preliminary_size );
+
                         //printf("opcode: %d\n", ws_opcode);
                         switch (ws_opcode) {
                             case 0: // continuation frame
@@ -954,36 +972,43 @@ int main(int argc, char **argv)
                         ++ws_state;
 
                         case 2:
+                        {
+                            int header_size = 0;
+                            if (ws_preliminary_size == 126) {
+                                WS_AT_LEAST(8, ws_bytes_received, ws_wait_for_bytes);
+                                ws_payload_bytes_expected = 
+                                    ((uint64_t)ws_buf_header[2] << 8) + ((uint64_t)ws_buf_header[3] << 0);
+                                WS_STORE_MASKING_KEY(ws_masking_key_raw, ws_buf_header, 4);
+                                header_size = 8; 
+                            } else if (ws_preliminary_size == 127) {
+                                WS_AT_LEAST(14, ws_bytes_received, ws_wait_for_bytes);
+                                ws_payload_bytes_expected = 
+                                    ((uint64_t)ws_buf_header[2] << 56) + ((uint64_t)ws_buf_header[3] << 48) + 
+                                    ((uint64_t)ws_buf_header[4] << 40) + ((uint64_t)ws_buf_header[5] << 32) + 
+                                    ((uint64_t)ws_buf_header[6] << 24) + ((uint64_t)ws_buf_header[7] << 16) + 
+                                    ((uint64_t)ws_buf_header[8] << 8) +  ((uint64_t)ws_buf_header[9] << 0); 
+                                WS_STORE_MASKING_KEY(ws_masking_key_raw, ws_buf_header, 10);
+                                header_size = 14; 
+                            } else {
+                                WS_AT_LEAST(6, ws_bytes_received, ws_wait_for_bytes);
+                                ws_payload_bytes_expected = ws_preliminary_size;
+                                WS_STORE_MASKING_KEY(ws_masking_key_raw, ws_buf_header, 2);
+                                header_size = 6; 
+                            }           
 
-                        if (ws_preliminary_size == 126) {
-                            WS_AT_LEAST(8, ws_bytes_received, ws_wait_for_bytes);
-                            ws_payload_bytes_expected = 
-                                ((uint64_t)ws_buf_header[2] << 8) + ((uint64_t)ws_buf_header[3] << 0);
-                            WS_STORE_MASKING_KEY(ws_masking_key_raw, ws_buf_header, 4);
-                        } else if (ws_preliminary_size == 127) {
-                            WS_AT_LEAST(14, ws_bytes_received, ws_wait_for_bytes);
-                            ws_payload_bytes_expected = 
-                                ((uint64_t)ws_buf_header[2] << 56) + ((uint64_t)ws_buf_header[3] << 48) + 
-                                ((uint64_t)ws_buf_header[4] << 40) + ((uint64_t)ws_buf_header[5] << 32) + 
-                                ((uint64_t)ws_buf_header[6] << 24) + ((uint64_t)ws_buf_header[7] << 16) + 
-                                ((uint64_t)ws_buf_header[8] << 8) +  ((uint64_t)ws_buf_header[9] << 0); 
-                            WS_STORE_MASKING_KEY(ws_masking_key_raw, ws_buf_header, 10);
-                        } else {
-                            WS_AT_LEAST(6, ws_bytes_received, ws_wait_for_bytes);
-                            ws_payload_bytes_expected = ws_preliminary_size;
-                            WS_STORE_MASKING_KEY(ws_masking_key_raw, ws_buf_header, 2);
-                        }           
-
-                        // memcpy unused or extra header bytes (which are actually payload) into ws_buf_decode
-                        if (ws_bytes_received < sizeof(ws_buf_header)) {
-                            size_t copied_payload = sizeof(ws_buf_header) - ws_bytes_received;
-                            memcpy( ws_buf_decode + ws_payload_upto, ws_buf_header + ws_bytes_received, copied_payload );
-                            ws_bytes_received = copied_payload;
-                        } else {
+                            // memcpy unused or extra header bytes (which are actually payload) into ws_buf_decode
+                            if (ws_bytes_received > header_size) {
+                                size_t copied_payload = ws_bytes_received - header_size;
+                                printf("copying %d bytes of payload\n", copied_payload);
+                                memcpy( ws_buf_decode + ws_payload_upto, ws_buf_header + header_size, copied_payload );
+                                ws_back_read = copied_payload;
+                            } 
                             ws_bytes_received = 0;
+                            ++ws_state;
                         }
-                        ++ws_state;
-
+                        case 3:
+                        case 4:
+                            break;
                         default:
                             WS_SEND_CLOSE_FRAME(1001, "Internal error");
                             GOTO_ERROR("ws internal error", ws_protocol_error);
