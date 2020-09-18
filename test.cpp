@@ -30,14 +30,28 @@ int main() {
     if ( std::holds_alternative<hpws::server>(server) ) {
         printf("we got a server\n");
 
-        auto client = std::get<hpws::server>(server).accept();
+        auto accept_result = std::get<hpws::server>(server).accept();
 
-        if (std::holds_alternative<hpws::client>(client)) {
+        if (std::holds_alternative<hpws::client>(accept_result)) {
             printf("a client connected\n");
         } else {
-            PRINT_HPWS_ERROR(client);
+            PRINT_HPWS_ERROR(accept_result);
         }
 
+        auto client = std::get<hpws::client>(std::move(accept_result));
+
+        for(;;) {
+            auto read_result = client.read();
+            if ( std::holds_alternative<hpws::error>(read_result) ) {
+                PRINT_HPWS_ERROR(read_result);
+                return 1;
+            }
+
+            std::string_view s = std::get<std::string_view>(read_result);
+            printf("got message from hpws: `%.*s`\n", s.size(), s.data());
+            
+            client.ack(s);    
+        }
 
     } else if ( std::holds_alternative<hpws::error>(server) )  {
         printf("we got an error\n");

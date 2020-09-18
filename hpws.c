@@ -525,7 +525,7 @@ int main(int argc, char **argv)
     uint64_t ws_payload_bytes_expected = 0;
     int ws_sent_close_frame = 0, ws_received_close_frame = 0,
         ws_payload_upto = 0, ws_preliminary_size = 0, ws_read_result = 0,
-        ws_back_read = 0;
+        ws_back_read = 0, ws_pending_read = 0;
 
     int ws_bytes_received = 0;
 
@@ -591,6 +591,8 @@ int main(int argc, char **argv)
 
                     int unlock = control_msg[1] - '0';
                     ws_buffer_lock[unlock] = 0;
+                    if (ws_buf_decode == NULL)
+                        ws_buf_decode =  ws_buffer[unlock]; 
                     break;
 
                 case 'o': // outgoing frame on buffer x, of size y
@@ -662,15 +664,17 @@ int main(int argc, char **argv)
         }
 
         // INCOMING DATA
-        if (fdset[0].revents & POLLIN) {
+        if (fdset[0].revents & POLLIN || ws_pending_read) {
             
             bytes_read = read(client, ssl_buf, sizeof(ssl_buf));
             /*fprintf(stderr, "raw bytes read %ld\nrawbytes:`", bytes_read);
             fwrite(ssl_buf, 1, bytes_read, stderr);
             fprintf(stderr, "`\n");*/
-            if (bytes_read <= 0) 
+            if (bytes_read <= 0) {
+                if (ws_pending_read)
+                    goto skip_ssl;
                 GOTO_ERROR("client closed connection", client_closed);
-
+            }
             bytes_written = BIO_write(rbio, ssl_buf, bytes_read);
             if (bytes_written <= 0)
                 GOTO_ERROR("could not write raw bytes to openssl from incoming socket", ssl_error);
@@ -684,6 +688,8 @@ int main(int argc, char **argv)
                 if (send(control_fd, buf, 1, 0) != 1)
                     GOTO_ERROR("could not write ready message to control fd", control_error);
             } 
+
+            skip_ssl:;
 
             if (SSL_is_init_finished(ssl)){
 
@@ -738,6 +744,12 @@ int main(int argc, char **argv)
 
                 for (;;) {
                     printf("ws_state : %d\n", ws_state);
+                    if (ws_buf_decode == NULL) {
+                        ws_pending_read = 1;
+                        printf("skipping websocket  read because there are no free buffers\n");
+                        goto skip_ws;
+                    }
+
                     if ( ws_state == 0 ) {
                         // we do one single read when the ws hasn't protocol upgraded yet
                     
@@ -768,6 +780,9 @@ int main(int argc, char **argv)
                         ws_bytes_received += ws_read_result;
                         
                     } else {
+
+
+                        ws_pending_read = 0;
 
                         uint64_t ws_payload_bytes_remaining =
                             ws_payload_bytes_expected - ws_payload_upto;
@@ -832,6 +847,22 @@ int main(int argc, char **argv)
                                         line++, ws_payload_bytes_remaining, ws_payload_bytes_expected, 
                                         ws_fin, ws_payload_upto, 
                                         (int)ws_payload_upto, ws_buf_decode);
+
+                                int sending_buf = ( ws_buf_decode == ws_buffer[0] ? 0 : 1 );
+                
+                                char control_msg[6] = { 'o', '0' + sending_buf, 0, 0, 0, 0 };
+                                *((uint32_t*)(control_msg+2)) = ws_payload_upto;
+
+                                send(control_fd, control_msg, 6, 0);
+                                // do the buffer swap
+                                ws_buffer_lock[sending_buf] = 1;
+                                int next_buf = ( sending_buf + 1 ) % 2; // this can be extended to more than 2 buffers
+                                if (ws_buffer_lock[ next_buf ]) {
+                                    // both buffers are now locked
+                                    ws_buf_decode = NULL;
+                                } else {
+                                    ws_buf_decode = ws_buffer[next_buf];
+                                }
 
                                 ws_payload_upto = 0;
                             } 

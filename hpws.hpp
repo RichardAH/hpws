@@ -34,14 +34,12 @@ namespace hpws {
         int child_pid = -1;  // if this client was created by a connect this is set
         // this value can't be changed once it's established between the processes
         uint32_t max_buffer_size;
-
         bool moved = false;
-
-
         sockaddr_in6 endpoint;
         int control_line_fd;
         int buffer_fd[4]; // 0 1 - in buffers, 2 3 - out buffers
         void* buffer[4];
+        bool ready = false;
 
         // private constructor
         client( 
@@ -56,6 +54,7 @@ namespace hpws {
             max_buffer_size (max_buffer_size),
             child_pid(child_pid)
         {
+            printf("client constructed with control line fd: %d\n",  control_line_fd);
             for (int i = 0; i < 4; ++i) {
                 this->buffer[i] = buffer[i];
                 this->buffer_fd[i] = buffer_fd[i];
@@ -72,9 +71,17 @@ namespace hpws {
         // only a move constructor
         client ( client&& old ) : 
             child_pid(old.child_pid), 
-            max_buffer_size(old.max_buffer_size)  
+            max_buffer_size(old.max_buffer_size),
+            endpoint(old.endpoint),
+            control_line_fd(old.control_line_fd),
+            ready(old.ready)
         {
             old.moved = true;
+            for (int i = 0; i < 4; ++i) {
+                this->buffer[i] = old.buffer[i];
+                this->buffer_fd[i] = old.buffer_fd[i];
+            }
+            printf("client moved with control line fd: %d\n",  control_line_fd);
         }
 
         ~client() {
@@ -92,6 +99,60 @@ namespace hpws {
                 close(control_line_fd);
             }
         } 
+        
+        std::variant<std::string_view, error> read()
+        {
+
+            char buf[32];
+            int bytes_read = 0;
+
+            read_start:;
+            printf("control  line fd: %d\n",control_line_fd);            
+            bytes_read = recv(control_line_fd, buf, sizeof(buf), 0);
+            if (bytes_read < 1)  {
+                perror("recv");
+                return error { 1,  "control line could not be read" }; // todo clean up somehow?
+            }
+
+            if (buf[0] == 'r') {
+                ready = true;
+                goto read_start;
+            }
+
+            if (!ready)
+                return error { 11, "received a message other than 'r' when client state not ready" };
+
+            switch ( buf[0] )
+            {
+                case 'o':
+                    {
+                    // there's a pending buffer for us
+                    uint32_t len = *((uint32_t*)(buf+2));
+                    int bufno = buf[1] - '0';
+                    if (bufno != 0 && bufno != 1)
+                        return error { 3, "invalid buffer in 'o' command sent by hpws" };
+                
+                    return std::string_view { (const char*)(buffer[bufno]), len };
+                    }
+                    break;
+                case 'a':
+                    break;
+                case 'c':
+                    break;
+                default:
+                    printf("read control message: `%.*s`\n",  bytes_read, buf);
+                    return error { 2, "unknown control line command was sent by hpws" };
+            }
+        }
+
+        std::optional<error> ack(std::string_view from_read)  {
+            char msg[2] = { 'a', '0' };
+            if (from_read.data() == buffer[1]) msg[1]++;
+            if (send(control_line_fd, msg, 2, 0) < 2)
+                return error { 10, "could not send ack down control line"};
+            return std::nullopt;
+
+        }
 /*
         static client connect_ipv4_str ( char ip[15], int port )
         {
@@ -130,6 +191,7 @@ namespace hpws {
         uint32_t max_buffer_size() {
             return max_buffer_size_;
         }
+
 
         std::variant<client, error> accept()
         {
