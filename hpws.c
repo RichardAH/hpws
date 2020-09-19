@@ -14,8 +14,8 @@
 #include <sys/mman.h>
 #include <getopt.h>
 
-//#define DEBUG 0
-#define DEBUG 1
+#define DEBUG 0
+//#define DEBUG 1
 
 // base64 from http://web.mit.edu/freebsd/head/contrib/wpa/src/utils/base64.c
 static const unsigned char base64_table[65] =
@@ -246,11 +246,9 @@ int main(int argc, char **argv)
     // mode 2 == client
 
     
-
-    if (hpws_mode == 2) {
-        // client
-            ABEND(1, "client mode not yet implemented sorry");
-    }
+    int client = -1;
+    struct sockaddr_in6 client_addr;
+    uint client_addr_len = sizeof(client_addr);
 
 
     // todo options sanity checks 
@@ -260,10 +258,6 @@ int main(int argc, char **argv)
 
     int is_server = ( hpws_mode == 1 );
 
-
-    int client = -1;
-    struct sockaddr_in6 client_addr;
-    uint client_addr_len = sizeof(client_addr);
 
     if (is_server) {
 
@@ -890,23 +884,26 @@ int main(int argc, char **argv)
                         uint64_t start_boundary =  ws_payload_upto + (8 - (ws_payload_upto % 8));
                         uint64_t end_boundary =  ws_payload_next - (ws_payload_next % 8);
 
-                        for (; i < start_boundary; ++i)
-                             *(ws_buf_decode + i) ^= ((unsigned char*)ws_masking_key_raw)[ (i) % 4 ];
-                             //printf("decoded A: %010d: `%.*s`\n", i, 1, (ws_buf_decode + i));
-                        
-                        uint8_t key_offset = i % 4; // this is a further optimisation since incrementing by 8 doesnt change %4
-            
-                        for(; i < end_boundary; i += 8)
-                            *(uint64_t*)(ws_buf_decode + i) ^=
-                                *((uint64_t*)(ws_masking_key_raw + key_offset));
+                        if (start_boundary < end_boundary)
+                        {
 
-                            //printf("decoded B: %010d: `%.*s`\n", i, 8, (ws_buf_decode + i));
-                         
-  
-                        for (; i < ws_payload_next; ++i) 
-                             *(ws_buf_decode + i) ^= ((unsigned char*)ws_masking_key_raw)[ (i) % 4 ];
-                           // printf("decoded C: %010d: `%.*s`\n", i, 1, (ws_buf_decode + i));
-                        //}
+                            for (; i < start_boundary; ++i)
+                                 *(ws_buf_decode + i) ^= ((unsigned char*)ws_masking_key_raw)[ (i) % 4 ];
+                            
+                            uint8_t key_offset = i % 4; // this is a further optimisation since incrementing by 8 doesnt change %4
+                
+                            for(; i < end_boundary; i += 8)
+                                *(uint64_t*)(ws_buf_decode + i) ^=
+                                    *((uint64_t*)(ws_masking_key_raw + key_offset));
+      
+                            for (; i < ws_payload_next; ++i) 
+                                 *(ws_buf_decode + i) ^= ((unsigned char*)ws_masking_key_raw)[ (i) % 4 ];
+
+                        } else 
+                            for (; i < ws_payload_next; ++i)
+                                 *(ws_buf_decode + i) ^= ((unsigned char*)ws_masking_key_raw)[i % 4 ];
+                            
+
  
                         //for(uint64_t i = ws_payload_upto; i < ws_payload_next; ++i)
                         //    ((unsigned char*) ws_buf_decode)[i] ^= ((unsigned char*)ws_masking_key_raw)[ i % 4 ];
@@ -943,7 +940,8 @@ int main(int argc, char **argv)
                                 char control_msg[6] = { 'o', '0' + sending_buf, 0, 0, 0, 0 };
                                 *((uint32_t*)(control_msg+2)) = ws_payload_next;
 
-                                printf("sending o msg len: %d\n", ws_payload_next);
+                                if (DEBUG)
+                                    printf("sending o msg len: %d\n", ws_payload_next);
 
                                 send(control_fd, control_msg, 6, 0);
                                 // do the buffer swap

@@ -37,8 +37,10 @@ int main() {
             }
 
             std::string_view s = std::get<std::string_view>(read_result);
+            
             //printf("got message from hpws: `%.*s`\n", s.size(), s.data());
-            //printf("got message size: %d\n", s.size());
+            fprintf(stderr, "%.*s", s.size(), s.data());
+            printf("got message size: %d\n", s.size());
             //fprintf(stderr, "buf contained: `");
             //for (int i = 0; i < s.size(); ++i)
             //    putc(s[i], stderr);

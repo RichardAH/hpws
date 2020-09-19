@@ -129,10 +129,11 @@ namespace hpws {
                     if (bufno != 0 && bufno != 1)
                         return error { 3, "invalid buffer in 'o' command sent by hpws" };
                
-                    fprintf(stderr, "read(%d) ---\n", len);
+                    /*fprintf(stderr, "read(%d) ---\n", len);
                     for (uint32_t i = 0; i < len; ++i) 
                         putc(((char*)(buffer[bufno]))[i], stderr);
                     fprintf(stderr, "\n---\n");
+                    */
                     return std::string_view { (const char*)(buffer[bufno]), len };
                     }
                     break;
@@ -255,7 +256,7 @@ namespace hpws {
                     HPWS_ACCEPT_ERROR(203, "non-scm_rights message sent on accept child control line");
                 memcpy(&buffer_fd, CMSG_DATA(cmsg), sizeof(buffer_fd));
                 for (int i = 0; i < 4; ++i) {
-                    fprintf(stderr, "scm passed buffer_fd[%d] = %d\n", i, buffer_fd[i]);
+                    //fprintf(stderr, "scm passed buffer_fd[%d] = %d\n", i, buffer_fd[i]);
                     if (buffer_fd[i] < 0)
                         HPWS_ACCEPT_ERROR(203, "child accept scm_rights a passed buffer fd was negative"); 
                     mapping[i] = 
