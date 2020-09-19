@@ -128,7 +128,11 @@ namespace hpws {
                     int bufno = buf[1] - '0';
                     if (bufno != 0 && bufno != 1)
                         return error { 3, "invalid buffer in 'o' command sent by hpws" };
-                
+               
+                    fprintf(stderr, "read(%d) ---\n", len);
+                    for (uint32_t i = 0; i < len; ++i) 
+                        putc(((char*)(buffer[bufno]))[i], stderr);
+                    fprintf(stderr, "\n---\n");
                     return std::string_view { (const char*)(buffer[bufno]), len };
                     }
                     break;

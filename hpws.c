@@ -767,8 +767,8 @@ int main(int argc, char **argv)
                         goto skip_ws;
                     }
 
-                    if (DEBUG)
-                        printf("entering ws loop\n");
+                    //if (DEBUG)
+                    //    printf("entering ws loop\n");
 
                     if ( ws_state == 0 ) {
                         // we do one single read when the ws hasn't protocol upgraded yet
@@ -818,14 +818,16 @@ int main(int argc, char **argv)
                         
                         // read into decode buffer
                         int buffer_bytes_left = ws_buffer_length - ws_bytes_received - ws_payload_upto - 8 - ws_back_read;
-                        if (DEBUG)
-                            printf("payload bytes remaining: %d buffer_bytes_left: %d\n", ws_payload_bytes_remaining, buffer_bytes_left);
+                        //if (DEBUG)
+                        //    printf("payload bytes remaining: %d buffer_bytes_left: %d\n", ws_payload_bytes_remaining, buffer_bytes_left);
                         
                         if (ws_payload_bytes_remaining > buffer_bytes_left)
                             WS_PROTOCOL_ERROR( "payload message exceeded maximum messagesize" ) ; // RH TODO make this a ws maxsize error 
 
                         ws_read_result =
-                            SSL_read( ssl, ws_buf_decode + ws_bytes_received + ws_payload_upto + ws_back_read, ws_payload_bytes_remaining );
+                            SSL_read( ssl,
+                                      ws_buf_decode + ws_bytes_received + ws_back_read,
+                                      ws_payload_bytes_remaining );
 
 // --  ws_payload_upto:  %d \n",  ws_read_result, ws_payload_upto);
 
@@ -862,7 +864,6 @@ int main(int argc, char **argv)
                             ws_header_back_read = spare_header_bytes;
                         }
  
-                        uint64_t key_offset = ws_bytes_received % 4;
                         ws_bytes_received += ws_read_result;
                             
                         uint64_t ws_payload_next = ws_read_result + ws_payload_upto;
@@ -876,18 +877,39 @@ int main(int argc, char **argv)
                         }          
 
                         if (DEBUG)
-                            printf("masking key loop:  %08X, %d - %d, (total)ws_bytes_received: %d\n",
-                                (*(uint32_t*)(ws_masking_key)),ws_payload_upto,
+                            printf("masking key loop:  %08X - offset: %d, %d - %d, (total)ws_bytes_received: %d\n",
+                                (*(uint32_t*)(ws_masking_key)), (ws_payload_upto % 4), ws_payload_upto,
                                 ws_payload_next, ws_bytes_received);
-    
-                        // this is an extremely tight loop, we dont want unnecessary condition checking in it
-                        for (uint64_t i = ws_payload_upto; i < ws_payload_next ; i += 8)
-                            *(uint64_t*)(ws_buf_decode + i) ^=
-                                *((uint64_t*)(ws_masking_key + key_offset));
+                        /*
+                            Efficient XOR processing loop
+                            First iterate to an 8 byte boundary one byte a time
+                            Next perform efficient 8 byte XORs to the final 8 byte boundary
+                            Finally iterate one byte at a time to the final byte boundary
+                        */
+                        uint64_t i = ws_payload_upto;
+                        uint64_t start_boundary =  ws_payload_upto + (8 - (ws_payload_upto % 8));
+                        uint64_t end_boundary =  ws_payload_next - (ws_payload_next % 8);
+
+                        for (; i < start_boundary; ++i)
+                             *(ws_buf_decode + i) ^= ((unsigned char*)ws_masking_key_raw)[ (i) % 4 ];
+                             //printf("decoded A: %010d: `%.*s`\n", i, 1, (ws_buf_decode + i));
                         
-                        // to keep the above loop tight we'll handle the edge case were we xor'd past the end
-                        for (uint64_t i = ws_payload_next; i < ws_payload_next + (ws_payload_next % 8); ++i) 
-                            ws_buf_decode[i] ^= ws_masking_key_raw[ (key_offset + i) % 4 ];
+                        uint8_t key_offset = i % 4; // this is a further optimisation since incrementing by 8 doesnt change %4
+            
+                        for(; i < end_boundary; i += 8)
+                            *(uint64_t*)(ws_buf_decode + i) ^=
+                                *((uint64_t*)(ws_masking_key_raw + key_offset));
+
+                            //printf("decoded B: %010d: `%.*s`\n", i, 8, (ws_buf_decode + i));
+                         
+  
+                        for (; i < ws_payload_next; ++i) 
+                             *(ws_buf_decode + i) ^= ((unsigned char*)ws_masking_key_raw)[ (i) % 4 ];
+                           // printf("decoded C: %010d: `%.*s`\n", i, 1, (ws_buf_decode + i));
+                        //}
+ 
+                        //for(uint64_t i = ws_payload_upto; i < ws_payload_next; ++i)
+                        //    ((unsigned char*) ws_buf_decode)[i] ^= ((unsigned char*)ws_masking_key_raw)[ i % 4 ];
                         
                         if (ws_state == 4) 
                         {
@@ -901,7 +923,7 @@ int main(int argc, char **argv)
                                     if ((int)ws_payload_bytes_expected < to_print)
                                         to_print = (int)ws_payload_bytes_expected;
                                     printf(
-                                            "(%05d: %02d/%02d - %d offset: %d packet: `%.*s`%s\n", 
+                                            "(%05d: %02d/%02d - %d offset: %d packet: `%.*s`%s`%.*s`\n", 
                                             line++,
                                             ws_payload_bytes_remaining,
                                             ws_payload_bytes_expected, 
@@ -909,8 +931,10 @@ int main(int argc, char **argv)
                                             ws_payload_bytes_expected, 
                                             to_print,
                                             ws_buf_decode,
-                                            ( ((int)ws_payload_bytes_expected < to_print) ? "": "..." )
-                                    );
+                                            ( ((int)ws_payload_bytes_expected < to_print) ? "": "..." ),
+                                            ( ((int)ws_payload_bytes_expected < to_print) ? 0: 20 ),
+                                            ( ((int)ws_payload_bytes_expected < to_print) ? "": (ws_buf_decode + ws_payload_bytes_expected - 20))); 
+                                    
 
                                 }
 
