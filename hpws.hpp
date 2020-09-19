@@ -156,18 +156,13 @@ namespace hpws {
             return std::nullopt;
 
         }
-/*
-        static client connect_ipv4_str ( char ip[15], int port )
-        {
 
+        static client connect ( std::string_view host, uint16_t port )
+        {
+           // RH TODO  
 
         }
 
-        static client connect_ipv6 ( sockaddr_in6 endpoint )
-        {
-
-        }
-*/
         friend class server;
     };
 

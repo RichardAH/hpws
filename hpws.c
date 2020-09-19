@@ -13,6 +13,8 @@
 #include <fcntl.h>
 #include <sys/mman.h>
 #include <getopt.h>
+#include <sys/types.h>
+#include <netdb.h>
 
 #define DEBUG 0
 //#define DEBUG 1
@@ -65,32 +67,42 @@ unsigned char * base64_encode(
 
 
 
-int create_listen(int port)
+int create_listen(int port, int is_ipv6)
 {
     int s;
-    struct sockaddr_in addr;
+    union {
+        struct sockaddr_in sin;
+        struct sockaddr_in6 sin6;
+    } sa ;
+ 
+    if (!is_ipv6) {
+        sa.sin.sin_family = AF_INET;
+        sa.sin.sin_port = htons(port);
+        sa.sin.sin_addr.s_addr = htonl(INADDR_ANY);
+        s = socket(AF_INET, SOCK_STREAM, 0);
+    } else {
+        sa.sin6.sin6_family = AF_INET6;
+        sa.sin6.sin6_addr = in6addr_any;
+        sa.sin6.sin6_port = htons(port);
+        s = socket(AF_INET6, SOCK_STREAM, 0);
+    }
 
-    addr.sin_family = AF_INET;
-    addr.sin_port = htons(port);
-    addr.sin_addr.s_addr = htonl(INADDR_ANY);
-
-    s = socket(AF_INET, SOCK_STREAM, 0);
     if (s < 0) {
-	perror("Unable to create socket");
-	exit(EXIT_FAILURE);
+        perror("Unable to create socket");
+        exit(EXIT_FAILURE);
     }
 
     int optval = 1;
     setsockopt(s, SOL_SOCKET, SO_REUSEPORT, &optval, sizeof(optval));
 
-    if (bind(s, (struct sockaddr*)&addr, sizeof(addr)) < 0) {
-	perror("Unable to bind");
-	exit(EXIT_FAILURE);
+    if (bind(s, (struct sockaddr*)&sa, sizeof(sa)) < 0) {
+        perror("Unable to bind");
+        exit(EXIT_FAILURE);
     }
 
     if (listen(s, 1) < 0) {
-	perror("Unable to listen");
-	exit(EXIT_FAILURE);
+        perror("Unable to listen");
+        exit(EXIT_FAILURE);
     }
 
     return s;
@@ -116,9 +128,9 @@ SSL_CTX *create_context()
 
     ctx = SSL_CTX_new(method);
     if (!ctx) {
-	perror("Unable to create SSL context");
-	ERR_print_errors_fp(stderr);
-	exit(EXIT_FAILURE);
+        perror("Unable to create SSL context");
+        ERR_print_errors_fp(stderr);
+        exit(EXIT_FAILURE);
     }
 
     return ctx;
@@ -131,12 +143,12 @@ void configure_context(SSL_CTX *ctx, char* cert, char* key)
     /* Set the key and cert */
     if (SSL_CTX_use_certificate_file(ctx, cert, SSL_FILETYPE_PEM) <= 0) {
         ERR_print_errors_fp(stderr);
-	exit(EXIT_FAILURE);
+        exit(EXIT_FAILURE);
     }
 
     if (SSL_CTX_use_PrivateKey_file(ctx, key, SSL_FILETYPE_PEM) <= 0 ) {
         ERR_print_errors_fp(stderr);
-	exit(EXIT_FAILURE);
+        exit(EXIT_FAILURE);
     }
 }
 
@@ -168,15 +180,80 @@ int main(int argc, char **argv)
     char cert[256];
     strcpy(cert, "cert.pem");
     char key[256];
+    char ip[40];
+    ip[0] = '\0';
     strcpy(key, "key.pem");
     int control_fd = -1; 
     int max_con = 512;
     int max_con_ip = 5;
     char host[256]; // this is the host as parsed from the cmdline when in client mode
-    host[0] = '\0';   
- 
+    host[0] = '\0'; 
+
     int hpws_mode = 0;
     
+    // todo: bitpack bool fields
+    char ws_state = 0;
+    char ws_fin = 0;
+    short ws_opcode = 0;
+    int ws_wait_for_bytes = 0;
+    unsigned char ws_masking_key[12];
+    uint64_t ws_payload_bytes_expected = 0;
+    int ws_sent_close_frame = 0, ws_received_close_frame = 0,
+        ws_payload_upto = 0, ws_preliminary_size = 0, ws_read_result = 0,
+        ws_back_read = 0, ws_header_back_read = 0, ws_pending_read = 0;
+
+    int ws_multi_frame_total_bytes_received = 0;
+    
+    char* ws_buffer[4];
+
+    int is_ipv6 = 0;
+    union {
+        struct sockaddr_in sin;
+        struct sockaddr_in6 sin6;
+    } client_addr;
+    size_t client_addr_len = sizeof(client_addr);
+    memset(&client_addr, 0, client_addr_len);
+
+    // rotating (swapping) buffers in and out
+    // both processes have the following
+    // 1. a buffer currently locked by the opposite process (being read)
+    // 2. a buffer currently being written to by this process (being written)
+    // 3. the buffer being written to will only be handed to the other process
+    //    when the buffer being read from is handed back 
+    //    this is so there is always a buffer to write into
+    int ws_buffer_fd[] = {
+        memfd_create("hpws_to_core_1", 0),
+        memfd_create("hpws_to_core_2", 0),
+        memfd_create("core_to_hpws_1", 0),
+        memfd_create("core_to_hpws_2", 0)
+    };
+
+    // these record which buffers are awaiting an ack
+    int ws_buffer_lock[] = {0, 0}; // 0 is ws_buffer[0], 1, is ws_buffer[1]
+    
+    for (int i = 0; i < 4; ++i) {
+        if (ws_buffer_fd[i] < 0) {
+            perror("failed to create memfd\n");
+            return 1;
+        }
+        if (ftruncate(ws_buffer_fd[i], ws_buffer_length)) {
+            perror("could not ftruncate memfd\n");
+            return 1;
+        }
+        void* mapping =
+            mmap( NULL, ws_buffer_length, PROT_WRITE | PROT_READ,
+                  MAP_SHARED, ws_buffer_fd[i], 0 );
+        if (mapping == (void*)-1) {
+            perror("failed to mmap memfd\n");
+            return 1;
+        }
+        ws_buffer[i] = mapping;
+        if (DEBUG)
+            printf("fd %d: %d - %x\n", i, ws_buffer_fd[i], mapping);   
+    }
+
+    char* ws_buf_decode = ws_buffer[0]; 
+
 
     {
         int option_index = 0;
@@ -192,6 +269,8 @@ int main(int argc, char **argv)
             {"cntlfd", required_argument, 0,  1 },
             {"maxcon", required_argument, 0,  1 },
             {"maxconip", required_argument, 0,  1 },
+            {"host", required_argument, 0,  1 },
+            {"ipv6", no_argument, 0,  1 },
             
             {0, 0,  0,  0 }
         };
@@ -213,10 +292,10 @@ int main(int argc, char **argv)
                     port = parse_int_or_exit(optarg, "port");
                     continue;
                 case 4:
-                    strcpy(cert, optarg);
+                    strncpy(cert, optarg, sizeof(cert));
                     continue;
                 case 5:
-                    strcpy(key, optarg);
+                    strncpy(key, optarg, sizeof(key));
                     continue;
                 case 6:
                     control_fd = parse_int_or_exit(optarg, "cntlfd");
@@ -226,6 +305,12 @@ int main(int argc, char **argv)
                     continue;
                 case 8:
                     max_con_ip = parse_int_or_exit(optarg, "maxconip");
+                    continue;
+                case 9:
+                    strncpy(host, optarg, sizeof(host));
+                    continue;
+                case 10:
+                    is_ipv6 = 1;
                     continue;
                 default:
                     continue;
@@ -241,14 +326,24 @@ int main(int argc, char **argv)
 
     if (hpws_mode >= 3)
         ABEND(2, "cannot specify both --client and --server, pick only one");
+   
+ 
+    int is_server = ( hpws_mode == 1 );
+
+    if (!is_server && host[0] == '\0')
+        ABEND(3, "must specify --host when invoking as a --client");
     
+    if (!is_server) {
+    }
+
+
+
+
     // mode 1 == server
     // mode 2 == client
 
     
     int client = -1;
-    struct sockaddr_in6 client_addr;
-    uint client_addr_len = sizeof(client_addr);
 
 
     // todo options sanity checks 
@@ -256,7 +351,6 @@ int main(int argc, char **argv)
     if (control_fd < 0)
         ABEND(5, "must supply a control FD --cntlfd <fd> as one side of a SOCK_SEQPACKET opened with socketpair");
 
-    int is_server = ( hpws_mode == 1 );
 
 
     if (is_server) {
@@ -269,7 +363,7 @@ int main(int argc, char **argv)
             ABEND(500, "could not send startup msg down control fd");
 
         // listen in an accept loop
-        int listen_sock = create_listen(port);
+        int listen_sock = create_listen(port, is_ipv6);
         for(;;) {
 
             client = accept(listen_sock, (struct sockaddr*)&client_addr, &client_addr_len);
@@ -344,9 +438,29 @@ int main(int argc, char **argv)
         }
     } else {
 
-        // RH TODO client = connect (....)
-        fprintf(stderr, "client connect not implemented\n");
-        exit(10);
+        struct addrinfo* res;
+        char p[10];
+        sprintf(p, "%d", port);
+        if (!getaddrinfo(host, p, NULL, &res))
+            ABEND(3, "host not found");
+
+        client = socket( res->ai_family, SOCK_STREAM, 0 );
+
+        if (res->ai_addrlen > sizeof(client_addr))
+            ABEND(4, "size of connect-to address exceeds address buffer");
+
+        memcpy(&client_addr, res->ai_addr, res->ai_addrlen);
+        client_addr_len = res->ai_addrlen;
+
+        if (!connect(client, (struct sockaddr *)&client_addr, client_addr_len))
+        {
+            perror("Unable to connect");
+            ABEND(5, "can't connect");
+        }
+        printf("connected\n");
+
+        ws_state = -1; // this state means we need to send an upgrade request
+        
     }
 
     // once we fall through to this point in execution the program is the same for
@@ -362,50 +476,6 @@ int main(int argc, char **argv)
         printf("connection established\n");
 
          
-    char* ws_buffer[4];
-
-
-    // rotating (swapping) buffers in and out
-    // both processes have the following
-    // 1. a buffer currently locked by the opposite process (being read)
-    // 2. a buffer currently being written to by this process (being written)
-    // 3. the buffer being written to will only be handed to the other process
-    //    when the buffer being read from is handed back 
-    //    this is so there is always a buffer to write into
-    int ws_buffer_fd[] = {
-        memfd_create("hpws_to_core_1", 0),
-        memfd_create("hpws_to_core_2", 0),
-        memfd_create("core_to_hpws_1", 0),
-        memfd_create("core_to_hpws_2", 0)
-    };
-
-    // these record which buffers are awaiting an ack
-    int ws_buffer_lock[] = {0, 0}; // 0 is ws_buffer[0], 1, is ws_buffer[1]
-    
-    for (int i = 0; i < 4; ++i) {
-        if (ws_buffer_fd[i] < 0) {
-            perror("failed to create memfd\n");
-            close(client);
-            return 1;
-        }
-        if (ftruncate(ws_buffer_fd[i], ws_buffer_length)) {
-            perror("could not ftruncate memfd\n");
-            close(client);
-            return 1;
-        }
-        void* mapping =
-            mmap( NULL, ws_buffer_length, PROT_WRITE | PROT_READ,
-                  MAP_SHARED, ws_buffer_fd[i], 0 );
-        if (mapping == (void*)-1) {
-            perror("failed to mmap memfd\n");
-            close(client);
-            return 1;
-        }
-        ws_buffer[i] = mapping;
-        if (DEBUG)
-            printf("fd %d: %d - %x\n", i, ws_buffer_fd[i], mapping);   
-    }
-
     // second thing the new client does is send its buffer fd's to the control line
     {
         struct msghdr msg = { 0 };
@@ -511,30 +581,9 @@ int main(int argc, char **argv)
         ssl_encrypt_len += len; \
     }
 
-// ---- WS ----
-
- 
 
     
 
-    // todo: bitpack bool fields
-    char ws_state = 0;
-    char ws_fin = 0;
-    short ws_opcode = 0;
-    int ws_wait_for_bytes = 0;
-    char ws_masking_key_raw[12];
-    uint64_t* ws_masking_key = (uint64_t*)(ws_masking_key_raw);
-    uint64_t ws_payload_bytes_expected = 0;
-    int ws_sent_close_frame = 0, ws_received_close_frame = 0,
-        ws_payload_upto = 0, ws_preliminary_size = 0, ws_read_result = 0,
-        ws_back_read = 0, ws_header_back_read = 0, ws_pending_read = 0;
-
-    int ws_bytes_received = 0;
-
-
-    char* ws_buf_decode = ws_buffer[0]; 
-
-// \/ ----- END WS 
 
     for (;;) {
 
@@ -705,12 +754,12 @@ int main(int argc, char **argv)
                     break;\
                 }}
 
-                #define WS_STORE_MASKING_KEY( masking_key_raw, buf, o )\
+                #define WS_STORE_MASKING_KEY( masking_key, buf, o )\
                 {\
                     if (DEBUG)\
                         printf("storing masking key %08X\n", *((uint32_t*)(&buf[o])));\
                     for (int i = 0; i < 12; ++i)\
-                        masking_key_raw[i] = buf[ o + (i % 4)];\
+                        masking_key[i] = buf[ o + (i % 4)];\
                 }
 
                 #define WS_SEND_CLOSE_FRAME( reason_code, reason_string )\
@@ -781,13 +830,13 @@ int main(int argc, char **argv)
                     } else if ( ws_state < 3 ) {
 
                         // read into header
-                        if (ws_bytes_received >= sizeof(ws_buf_header))
+                        if (ws_multi_frame_total_bytes_received >= sizeof(ws_buf_header))
                             WS_PROTOCOL_ERROR( "tried to read beyond 14 bytes of header" );
 
                         ws_read_result = 
                             SSL_read( ssl,
-                                ws_buf_header + ws_bytes_received + ws_header_back_read,
-                                sizeof(ws_buf_header) - ws_bytes_received - ws_header_back_read );
+                                ws_buf_header + ws_multi_frame_total_bytes_received + ws_header_back_read,
+                                sizeof(ws_buf_header) - ws_multi_frame_total_bytes_received - ws_header_back_read );
                         
                         
                         if (ws_read_result <= 0) {
@@ -801,7 +850,7 @@ int main(int argc, char **argv)
                             ws_header_back_read = 0;
                         }
 
-                        ws_bytes_received += ws_read_result;
+                        ws_multi_frame_total_bytes_received += ws_read_result;
                         
                     } else {
 
@@ -811,7 +860,7 @@ int main(int argc, char **argv)
                             ws_payload_bytes_expected - ws_payload_upto;
                         
                         // read into decode buffer
-                        int buffer_bytes_left = ws_buffer_length - ws_bytes_received - ws_payload_upto - 8 - ws_back_read;
+                        int buffer_bytes_left = ws_buffer_length - ws_multi_frame_total_bytes_received - ws_payload_upto - 8 - ws_back_read;
                         //if (DEBUG)
                         //    printf("payload bytes remaining: %d buffer_bytes_left: %d\n", ws_payload_bytes_remaining, buffer_bytes_left);
                         
@@ -820,7 +869,7 @@ int main(int argc, char **argv)
 
                         ws_read_result =
                             SSL_read( ssl,
-                                      ws_buf_decode + ws_bytes_received + ws_back_read,
+                                      ws_buf_decode + ws_multi_frame_total_bytes_received + ws_back_read,
                                       ws_payload_bytes_remaining );
 
 // --  ws_payload_upto:  %d \n",  ws_read_result, ws_payload_upto);
@@ -851,14 +900,14 @@ int main(int argc, char **argv)
                                 // this should never happen but catch it incase some bug makes it happen
                                 WS_PROTOCOL_ERROR( "could not back-backcopy header bytes from decode buffer, header bytes too long");
                             memcpy( ws_buf_header,
-                                    ws_buf_decode + ws_bytes_received + ws_payload_upto + ws_payload_bytes_remaining,
+                                    ws_buf_decode + ws_multi_frame_total_bytes_received + ws_payload_upto + ws_payload_bytes_remaining,
                                     spare_header_bytes );  
                             ws_read_result = ws_payload_bytes_remaining;
 
                             ws_header_back_read = spare_header_bytes;
                         }
  
-                        ws_bytes_received += ws_read_result;
+                        ws_multi_frame_total_bytes_received += ws_read_result;
                             
                         uint64_t ws_payload_next = ws_read_result + ws_payload_upto;
                         
@@ -871,42 +920,43 @@ int main(int argc, char **argv)
                         }          
 
                         if (DEBUG)
-                            printf("masking key loop:  %08X - offset: %d, %d - %d, (total)ws_bytes_received: %d\n",
+                            printf("masking key loop:  %08X - offset: %d, %d - %d, (total)ws_multi_frame_total_bytes_received: %d\n",
                                 (*(uint32_t*)(ws_masking_key)), (ws_payload_upto % 4), ws_payload_upto,
-                                ws_payload_next, ws_bytes_received);
+                                ws_payload_next, ws_multi_frame_total_bytes_received);
                         /*
                             Efficient XOR processing loop
                             First iterate to an 8 byte boundary one byte a time
                             Next perform efficient 8 byte XORs to the final 8 byte boundary
                             Finally iterate one byte at a time to the final byte boundary
                         */
+                        {
                         uint64_t i = ws_payload_upto;
                         uint64_t start_boundary =  ws_payload_upto + (8 - (ws_payload_upto % 8));
                         uint64_t end_boundary =  ws_payload_next - (ws_payload_next % 8);
+                        unsigned char*  restrict buf = ws_buf_decode;
+
 
                         if (start_boundary < end_boundary)
                         {
 
                             for (; i < start_boundary; ++i)
-                                 *(ws_buf_decode + i) ^= ((unsigned char*)ws_masking_key_raw)[ (i) % 4 ];
+                                 *(buf + i) ^= ws_masking_key[i % 4];
                             
                             uint8_t key_offset = i % 4; // this is a further optimisation since incrementing by 8 doesnt change %4
                 
                             for(; i < end_boundary; i += 8)
-                                *(uint64_t*)(ws_buf_decode + i) ^=
-                                    *((uint64_t*)(ws_masking_key_raw + key_offset));
+                                *(uint64_t*)(buf + i) ^=
+                                    *((uint64_t*)(ws_masking_key + key_offset));
       
                             for (; i < ws_payload_next; ++i) 
-                                 *(ws_buf_decode + i) ^= ((unsigned char*)ws_masking_key_raw)[ (i) % 4 ];
+                                 *(buf + i) ^= ((unsigned char*)ws_masking_key)[ i % 4 ];
 
                         } else 
                             for (; i < ws_payload_next; ++i)
-                                 *(ws_buf_decode + i) ^= ((unsigned char*)ws_masking_key_raw)[i % 4 ];
+                                 *(buf + i) ^= ((unsigned char*)ws_masking_key)[i % 4];
                             
-
+                        }
  
-                        //for(uint64_t i = ws_payload_upto; i < ws_payload_next; ++i)
-                        //    ((unsigned char*) ws_buf_decode)[i] ^= ((unsigned char*)ws_masking_key_raw)[ i % 4 ];
                         
                         if (ws_state == 4) 
                         {
@@ -957,7 +1007,7 @@ int main(int argc, char **argv)
                                 ws_payload_upto = 0;
                             } 
     
-                            ws_bytes_received = 0;
+                            ws_multi_frame_total_bytes_received = 0;
                             ws_state = 1;
                         } else { 
                             ws_payload_upto = ws_payload_next;
@@ -965,10 +1015,15 @@ int main(int argc, char **argv)
                     }
 
 
-                    if ( !( ws_state < 3 && ws_bytes_received < ws_wait_for_bytes) )
+                    if ( !( ws_state < 3 && ws_multi_frame_total_bytes_received < ws_wait_for_bytes) )
                     switch ( ws_state )
                     {
-
+                        case -1:
+                        {
+                            // we need to send a request
+ 
+                            break;
+                        }
                         case 0:
                         {
                             static char to_find[] = "Sec-WebSocket-Key:";
@@ -1030,7 +1085,7 @@ int main(int argc, char **argv)
 
                         case 1:       
                         // read a header, will always have at least 2 bytes
-                        WS_AT_LEAST(2, ws_bytes_received, ws_wait_for_bytes);
+                        WS_AT_LEAST(2, ws_multi_frame_total_bytes_received, ws_wait_for_bytes);
 
                         if (ws_buf_header[0] & 0b01110000)
                             WS_PROTOCOL_ERROR("rsv1-3 must be 0");
@@ -1053,7 +1108,7 @@ int main(int argc, char **argv)
                         if (DEBUG) 
                         {
                             printf("ws header: bytes_read %d ws_opcode %d ws_fin %d ws_preliminary_size %d\n",
-                                ws_bytes_received, ws_opcode, ws_fin,  ws_preliminary_size );
+                                ws_multi_frame_total_bytes_received, ws_opcode, ws_fin,  ws_preliminary_size );
     
                             printf("opcode: %d\n", ws_opcode);
                         }
@@ -1064,7 +1119,7 @@ int main(int argc, char **argv)
                                 break;
                             case 8: // close frame
                                 {
-                                    WS_AT_LEAST(ws_preliminary_size,  ws_bytes_received, ws_wait_for_bytes);
+                                    WS_AT_LEAST(ws_preliminary_size,  ws_multi_frame_total_bytes_received, ws_wait_for_bytes);
                                     ws_received_close_frame = 1;
                                     WS_SEND_CLOSE_FRAME(1000, "Bye!");
                                     // send a 'c' message to the control line
@@ -1077,7 +1132,7 @@ int main(int argc, char **argv)
                             case 10:  // pong frame, discard
                                 {
                                     // modify the opcode and send it back
-                                    WS_AT_LEAST(ws_preliminary_size, ws_bytes_received, ws_wait_for_bytes);
+                                    WS_AT_LEAST(ws_preliminary_size, ws_multi_frame_total_bytes_received, ws_wait_for_bytes);
                                     if (DEBUG)
                                         printf("ping/pong frame\n");
                                     if (ws_opcode == 9) {        
@@ -1087,7 +1142,7 @@ int main(int argc, char **argv)
                                     }
                                     ws_state  = 1;
                                     ws_wait_for_bytes = 2;
-                                    ws_bytes_received = 0;
+                                    ws_multi_frame_total_bytes_received = 0;
                                     break;
                                 }
                             default:
@@ -1105,30 +1160,30 @@ int main(int argc, char **argv)
                             if (ws_preliminary_size == 126) {
                                 if (DEBUG)
                                     printf("[[PATH A]]  %02X %02X %02X %02X\n",ws_buf_header[0], ws_buf_header[1], ws_buf_header[2], ws_buf_header[3]);
-                                WS_AT_LEAST(8, ws_bytes_received, ws_wait_for_bytes);
+                                WS_AT_LEAST(8, ws_multi_frame_total_bytes_received, ws_wait_for_bytes);
                                 ws_payload_bytes_expected=  
                                     ((uint64_t)ws_buf_header[2] << 8) + ((uint64_t)ws_buf_header[3] << 0);
-                                WS_STORE_MASKING_KEY(ws_masking_key_raw, ws_buf_header, 4);
+                                WS_STORE_MASKING_KEY(ws_masking_key, ws_buf_header, 4);
                                 if (DEBUG)
                                     printf("ws_payload_bytes_expected %lu\n", ws_payload_bytes_expected);
                                 header_size = 8; 
                             } else if (ws_preliminary_size == 127) {
                                 if (DEBUG)
                                     printf("[[PATH B]]\n");
-                                WS_AT_LEAST(14, ws_bytes_received, ws_wait_for_bytes);
+                                WS_AT_LEAST(14, ws_multi_frame_total_bytes_received, ws_wait_for_bytes);
                                 ws_payload_bytes_expected = 
                                     ((uint64_t)ws_buf_header[2] << 56) + ((uint64_t)ws_buf_header[3] << 48) + 
                                     ((uint64_t)ws_buf_header[4] << 40) + ((uint64_t)ws_buf_header[5] << 32) + 
                                     ((uint64_t)ws_buf_header[6] << 24) + ((uint64_t)ws_buf_header[7] << 16) + 
                                     ((uint64_t)ws_buf_header[8] << 8) +  ((uint64_t)ws_buf_header[9] << 0); 
-                                WS_STORE_MASKING_KEY(ws_masking_key_raw, ws_buf_header, 10);
+                                WS_STORE_MASKING_KEY(ws_masking_key, ws_buf_header, 10);
                                 header_size = 14; 
                             } else {
                                 if (DEBUG)
                                     printf("[[PATH C]]\n");
-                                WS_AT_LEAST(6, ws_bytes_received, ws_wait_for_bytes);
+                                WS_AT_LEAST(6, ws_multi_frame_total_bytes_received, ws_wait_for_bytes);
                                 ws_payload_bytes_expected = ws_preliminary_size;
-                                WS_STORE_MASKING_KEY(ws_masking_key_raw, ws_buf_header, 2);
+                                WS_STORE_MASKING_KEY(ws_masking_key, ws_buf_header, 2);
                                 header_size = 6; 
                             }          
                         
@@ -1136,14 +1191,14 @@ int main(int argc, char **argv)
                                 printf("payload bytes expected:  %d\n",ws_payload_bytes_expected); 
 
                             // memcpy unused or extra header bytes (which are actually payload) into ws_buf_decode
-                            if (ws_bytes_received > header_size) {
-                                size_t copied_payload = ws_bytes_received - header_size;
+                            if (ws_multi_frame_total_bytes_received > header_size) {
+                                size_t copied_payload = ws_multi_frame_total_bytes_received - header_size;
                                 if (DEBUG)
                                     printf("copying %d bytes of payload\n", copied_payload);
                                 memcpy( ws_buf_decode + ws_payload_upto, ws_buf_header + header_size, copied_payload );
                                 ws_back_read = copied_payload;
                             } 
-                            ws_bytes_received = 0;
+                            ws_multi_frame_total_bytes_received = 0;
                             ++ws_state;
                         }
                         case 3:
