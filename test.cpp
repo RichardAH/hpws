@@ -2,9 +2,6 @@
     #include <vector>
 #include "hpws.hpp"
 
-
-int main() {
-
     #define PRINT_HPWS_ERROR(obj)\
     {\
         if (std::holds_alternative<hpws::error>(obj)) {\
@@ -12,6 +9,52 @@ int main() {
             printf("error code: %d -- error msg: %.*s\n", e.first, (int)(e.second.size()), e.second.data());\
         } else printf("asked to print an error but the object was not an error object\n");\
     }
+
+int example_server();
+int example_client();
+int main(int argc, char** argv) {
+    if (argc > 1 && argv[1][0] == 'c')
+        example_client();
+    else
+        example_server();
+}
+
+int example_client() {
+    auto accept_result = hpws::client::connect ( "hpws", 16*1024*1024, "echo.websocket.org", 443, {} );
+    
+    if (std::holds_alternative<hpws::client>(accept_result)) {
+        printf("a client connected\n");
+    } else {
+        PRINT_HPWS_ERROR(accept_result);
+    }
+
+    auto client = std::get<hpws::client>(std::move(accept_result));
+
+    for(;;) {
+        auto read_result = client.read();
+        if ( std::holds_alternative<hpws::error>(read_result) ) {
+            PRINT_HPWS_ERROR(read_result);
+            //return 1;
+            break;
+        }
+
+        std::string_view s = std::get<std::string_view>(read_result);
+        
+        //printf("got message from hpws: `%.*s`\n", s.size(), s.data());
+        fprintf(stderr, "%.*s", s.size(), s.data());
+        printf("got message size: %d\n", s.size());
+        //fprintf(stderr, "buf contained: `");
+        //for (int i = 0; i < s.size(); ++i)
+        //    putc(s[i], stderr);
+        //fprintf(stderr,"`\n");           
+
+        client.ack(s);    
+    }
+
+}
+
+
+int example_server() {
     auto server = hpws::server::create ( "hpws", 16*1024*1024, 443, 512, 2, "cert.pem", "key.pem", {} );
 
     if ( std::holds_alternative<hpws::server>(server) ) {

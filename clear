@@ -1,4 +1,4 @@
 #!/bin/bash
 ps aux | grep -v grep | grep hpws  | awk '{print $2}' | xargs -I{} kill -9 {}
 ps aux | grep -v grep | grep hpws
-./test
+./test $1

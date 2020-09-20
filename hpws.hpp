@@ -19,6 +19,10 @@
 #include <sys/wait.h>
 
 namespace hpws {
+    /*typedef enum e_retcode {
+        SUCCESS
+    } retcode;
+    */
     using error = std::pair<int, std::string>;
 
     // used when waiting for messages that should already be on the pipe
@@ -26,16 +30,24 @@ namespace hpws {
     // used when waiting for server process to spawn
     #define HPWS_LONG_TIMEOUT 1500 
 
+    typedef union {
+        struct sockaddr sa;
+        struct sockaddr_in sin;
+        struct sockaddr_in6 sin6;
+        struct sockaddr_storage ss;
+    } addr_t ;
+
+
     class server;
 
     class client {
 
     private: 
-        int child_pid = -1;  // if this client was created by a connect this is set
+        uint32_t child_pid = 0;  // if this client was created by a connect this is set
         // this value can't be changed once it's established between the processes
         uint32_t max_buffer_size;
         bool moved = false;
-        sockaddr_in6 endpoint;
+        addr_t endpoint;
         int control_line_fd;
         int buffer_fd[4]; // 0 1 - in buffers, 2 3 - out buffers
         void* buffer[4];
@@ -43,7 +55,7 @@ namespace hpws {
 
         // private constructor
         client( 
-            sockaddr_in6 endpoint,
+            addr_t endpoint,
             int control_line_fd,
             uint32_t max_buffer_size,
             int child_pid,
@@ -58,6 +70,8 @@ namespace hpws {
                 this->buffer[i] = buffer[i];
                 this->buffer_fd[i] = buffer_fd[i];
             }
+
+            printf("child constructed pid = %d\n", child_pid);
         } 
 
 
@@ -157,12 +171,187 @@ namespace hpws {
 
         }
 
-        static client connect ( std::string_view host, uint16_t port )
+        static std::variant<client, error> connect (
+            std::string_view bin_path,
+            uint32_t max_buffer_size,
+            std::string_view host, 
+            uint16_t port,
+            std::vector<std::string_view> argv  )
         {
-           // RH TODO  
 
+            #define HPWS_CONNECT_ERROR(code, msg)\
+            {\
+                error_code = code;\
+                error_msg = msg;\
+                goto connect_error;\
+            }
+
+            int error_code = -1;
+            const char* error_msg = NULL;
+            int fd[2] = {-1, -1}; 
+            int pid = -1;            
+            int count_args = 10 + argv.size();
+            char const ** argv_pass = NULL;
+
+            if (socketpair(AF_UNIX, SOCK_SEQPACKET, 0, fd))
+                HPWS_CONNECT_ERROR(100, "could not create unix domain socket pair");
+
+            // construct the arguments
+            char shm_size[32];
+
+            if (snprintf(shm_size, 32, "%d", max_buffer_size) <= 0)
+                HPWS_CONNECT_ERROR(90, "couldn't write shm size to string");
+ 
+            char port_str[6];
+            if (snprintf(port_str, 6, "%d", port) <= 0)
+                HPWS_CONNECT_ERROR(91, "couldn't write port to string");
+            
+            argv_pass = 
+                reinterpret_cast<char const **>(alloca(sizeof(char*)*count_args));
+            {
+                int upto = 0;
+                argv_pass[upto++] = bin_path.data();
+                argv_pass[upto++] = "--client";
+                argv_pass[upto++] = "--maxmsg";
+                argv_pass[upto++] = shm_size;
+                argv_pass[upto++] = "--host";
+                argv_pass[upto++] = host.data();
+                argv_pass[upto++] = "--port";
+                argv_pass[upto++] = port_str;
+                argv_pass[upto++] = "--cntlfd";
+                argv_pass[upto++] = "3";
+                for ( std::string_view& arg : argv )
+                    argv_pass[upto++] = arg.data();
+                argv_pass[upto] = NULL; 
+            }
+
+            pid = vfork();
+
+            if (pid) {
+
+                // --- PARENT
+
+                close(fd[1]);
+
+                int child_fd = fd[0];
+                    
+                int flags = fcntl(child_fd, F_GETFD, NULL);
+                if (flags < 0)
+                    HPWS_CONNECT_ERROR(101, "could not get flags from unix domain socket");
+
+                flags |= FD_CLOEXEC;
+                if (fcntl(child_fd, F_SETFD, flags))
+                    HPWS_CONNECT_ERROR(102, "could notset flags for unix domain socket");
+
+                // we will set a timeout and wait for the initial startup message from hpws client mode
+                struct pollfd pfd;
+                int ret;
+
+                pfd.fd = child_fd;
+                pfd.events = POLLIN;
+                ret = poll(&pfd, 1, HPWS_LONG_TIMEOUT); // default= 1500 ms timeout
+
+                // timeout or error
+                if (ret < 1)
+                    HPWS_CONNECT_ERROR(1, "timeout waiting for hpws connect message");
+
+                printf("waiting for addr_t\n");
+                // first thing we'll receive is the sockaddr union
+                addr_t child_addr;
+
+                int bytes_read =
+                    recv(child_fd, (unsigned char*)(&child_addr), sizeof(child_addr), 0);            
+
+                if (bytes_read < sizeof(child_addr))
+                    HPWS_CONNECT_ERROR(202, "received message on control line was not sizeof(addr_t)");
+
+                printf("waiting for buffer fds\n");
+                // second thing we will receive is the four fds for the buffers
+                int buffer_fd[4]  =  { -1, -1, -1, -1 };
+                void* mapping[4];
+                {
+                    struct msghdr child_msg = { 0 };
+                    memset(&child_msg, 0, sizeof(child_msg));
+                    char cmsgbuf[CMSG_SPACE(sizeof(int)*4)];
+                    child_msg.msg_control = cmsgbuf;
+                    child_msg.msg_controllen = sizeof(cmsgbuf);
+
+                    int bytes_read = 
+                        recvmsg(child_fd, &child_msg, 0);
+                    struct cmsghdr *cmsg = CMSG_FIRSTHDR(&child_msg);
+                    if (cmsg == NULL || cmsg -> cmsg_type != SCM_RIGHTS)
+                        HPWS_CONNECT_ERROR(203, "non-scm_rights message sent on accept child control line");
+                    memcpy(&buffer_fd, CMSG_DATA(cmsg), sizeof(buffer_fd));
+                    for (int i = 0; i < 4; ++i) {
+                        //fprintf(stderr, "scm passed buffer_fd[%d] = %d\n", i, buffer_fd[i]);
+                        if (buffer_fd[i] < 0)
+                            HPWS_CONNECT_ERROR(203, "child accept scm_rights a passed buffer fd was negative"); 
+                        mapping[i] = 
+                            mmap( 0, max_buffer_size, PROT_READ | PROT_WRITE, MAP_SHARED, buffer_fd[i], 0 );
+                        if (mapping[i] == (void*)(-1))
+                            HPWS_CONNECT_ERROR(204, "could not mmap scm_rights passed buffer fd");
+                    }
+                }
+                printf("waiting for 'r'\n");
+
+                // now we wait for a 'r' ready message or for the socket/client to die
+                ret = poll(&pfd, 1, HPWS_LONG_TIMEOUT); // default= 1500 ms timeout
+
+                char rbuf[1];
+                bytes_read = recv(fd[0], rbuf,sizeof(rbuf), 0); 
+                if (bytes_read < 1)
+                    HPWS_CONNECT_ERROR(2, "nil message sent by hpws on startup");
+
+                if (rbuf[0] = 'r') 
+                    HPWS_CONNECT_ERROR(3, "unexpected content in message sent by hpws client mode on startup");
+                
+                return client {
+                    child_addr,
+                    child_fd,
+                    max_buffer_size,
+                    pid,
+                    buffer_fd,
+                    mapping
+                };
+
+            } else {
+          
+                // --- CHILD
+                
+                close(fd[0]);
+                
+                // dup fd[1] into fd 3
+                dup2(fd[1], 3);
+                close(fd[1]);
+                    
+                // we're assuming all fds above 3 will have close_exec flag
+                execv(bin_path.data(), (char* const*)argv_pass);
+                // we will send a nil message down the pipe to help the parent know somethings gone wrong
+                char nil[1];
+                nil[0] = 0;
+                send(3, nil, 1, 0);
+                exit(1); // execl failure as child will always result in exit here
+            
+            }
+            
+ 
+            connect_error:;
+
+                // NB: execution to here can only happen in parent process            
+                // clean up any mess after error
+                if (pid > 0) 
+                    kill(pid, SIGKILL); /* RH TODO change this to SIGTERM and set a timeout? */
+                    int status;
+                    waitpid(pid, &status, 0 /* should we use WNOHANG? */);
+                if (fd[0] > 0)
+                    close(fd[0]);
+                if (fd[1] > 0)
+                    close(fd[1]);
+                
+                return error{error_code, std::string{error_msg}};
+
+    
         }
-
         friend class server;
     };
 
@@ -193,8 +382,9 @@ namespace hpws {
 
         std::variant<client, error> accept()
         {
-            #define HPWS_ACCEPT_ERROR(code,msg)\
-            {return error{code, std::string{msg}};}
+            #define HPWS_ACCEPT_ERROR(code, msg)\
+                { return error {code, msg}; }
+
             int child_fd = -1;
             {
                 struct msghdr child_msg = { 0 };
@@ -223,18 +413,22 @@ namespace hpws {
 
             // timeout or error
             if (ret < 1)
-                HPWS_ACCEPT_ERROR(202, "timeout waiting for hpws accept child message");
+                return error{202, "timeout waiting for hpws accept child message"};
 
-            // first thing we'll receive is the IP address structure of the client
-            
-            unsigned char buf[sizeof(sockaddr_in6)];
+            // first thing we'll receive is the pid of the client
+            uint32_t pid = 0;
+            if (recv(child_fd, (unsigned char*)(&pid), sizeof(pid), 0) < sizeof(pid))
+                HPWS_ACCEPT_ERROR(212, "did not receive expected 4 byte pid of child process on accept");
+
+            // second thing we'll receive is IP address structure of the client
+            addr_t buf;
             int bytes_read =
-                recv(child_fd, buf, sizeof(buf), 0);            
+                recv(child_fd, (unsigned char*)(&buf), sizeof(buf), 0);            
 
-            if (bytes_read < sizeof(sockaddr_in6))
-                HPWS_ACCEPT_ERROR(202, "received message on master control line was not sizeof(sockaddr_in6)");
+            if (bytes_read < sizeof(buf))
+                return error{202, "received message on master control line was not sizeof(sockaddr_in6)"};
 
-            // second thing we will receive is the four fds for the buffers
+            // third thing we will receive is the four fds for the buffers
             int buffer_fd[4]  =  { -1, -1, -1, -1 };
             void* mapping[4];
             {
@@ -248,24 +442,24 @@ namespace hpws {
                     recvmsg(child_fd, &child_msg, 0);
                 struct cmsghdr *cmsg = CMSG_FIRSTHDR(&child_msg);
                 if (cmsg == NULL || cmsg -> cmsg_type != SCM_RIGHTS)
-                    HPWS_ACCEPT_ERROR(203, "non-scm_rights message sent on accept child control line");
+                    return error{203, "non-scm_rights message sent on accept child control line"};
                 memcpy(&buffer_fd, CMSG_DATA(cmsg), sizeof(buffer_fd));
                 for (int i = 0; i < 4; ++i) {
                     //fprintf(stderr, "scm passed buffer_fd[%d] = %d\n", i, buffer_fd[i]);
                     if (buffer_fd[i] < 0)
-                        HPWS_ACCEPT_ERROR(203, "child accept scm_rights a passed buffer fd was negative"); 
+                        return error{203, "child accept scm_rights a passed buffer fd was negative"}; 
                     mapping[i] = 
                         mmap( 0, max_buffer_size_, PROT_READ | PROT_WRITE, MAP_SHARED, buffer_fd[i], 0 );
                     if (mapping[i] == (void*)(-1))
-                        HPWS_ACCEPT_ERROR(204, "could not mmap scm_rights passed buffer fd");
+                        return error{204, "could not mmap scm_rights passed buffer fd"};
                 }
             }
 
             return client {
-                *(reinterpret_cast<sockaddr_in6*>(buf)),
+                buf,
                 child_fd,
                 max_buffer_size_,
-                -1,
+                pid,
                 buffer_fd,
                 mapping
             };

@@ -16,8 +16,9 @@
 #include <sys/types.h>
 #include <netdb.h>
 
-#define DEBUG 0
-//#define DEBUG 1
+//#define DEBUG 0
+#define DEBUG 1
+
 
 // base64 from http://web.mit.edu/freebsd/head/contrib/wpa/src/utils/base64.c
 static const unsigned char base64_table[65] =
@@ -71,19 +72,21 @@ int create_listen(int port, int is_ipv6)
 {
     int s;
     union {
+        struct sockaddr sa;
         struct sockaddr_in sin;
         struct sockaddr_in6 sin6;
-    } sa ;
+        struct sockaddr_storage ss; 
+    } addr ;
  
     if (!is_ipv6) {
-        sa.sin.sin_family = AF_INET;
-        sa.sin.sin_port = htons(port);
-        sa.sin.sin_addr.s_addr = htonl(INADDR_ANY);
+        addr.sin.sin_family = AF_INET;
+        addr.sin.sin_port = htons(port);
+        addr.sin.sin_addr.s_addr = htonl(INADDR_ANY);
         s = socket(AF_INET, SOCK_STREAM, 0);
     } else {
-        sa.sin6.sin6_family = AF_INET6;
-        sa.sin6.sin6_addr = in6addr_any;
-        sa.sin6.sin6_port = htons(port);
+        addr.sin6.sin6_family = AF_INET6;
+        addr.sin6.sin6_addr = in6addr_any;
+        addr.sin6.sin6_port = htons(port);
         s = socket(AF_INET6, SOCK_STREAM, 0);
     }
 
@@ -95,7 +98,7 @@ int create_listen(int port, int is_ipv6)
     int optval = 1;
     setsockopt(s, SOL_SOCKET, SO_REUSEPORT, &optval, sizeof(optval));
 
-    if (bind(s, (struct sockaddr*)&sa, sizeof(sa)) < 0) {
+    if (bind(s, (struct sockaddr*)&(addr.sa), sizeof(addr)) < 0) {
         perror("Unable to bind");
         exit(EXIT_FAILURE);
     }
@@ -140,15 +143,19 @@ void configure_context(SSL_CTX *ctx, char* cert, char* key)
 {
     SSL_CTX_set_ecdh_auto(ctx, 1);
 
+    if (cert) {
     /* Set the key and cert */
-    if (SSL_CTX_use_certificate_file(ctx, cert, SSL_FILETYPE_PEM) <= 0) {
-        ERR_print_errors_fp(stderr);
-        exit(EXIT_FAILURE);
-    }
+        if (SSL_CTX_use_certificate_file(ctx, cert, SSL_FILETYPE_PEM) <= 0) {
+            ERR_print_errors_fp(stderr);
+            exit(EXIT_FAILURE);
+        }
+    } 
 
-    if (SSL_CTX_use_PrivateKey_file(ctx, key, SSL_FILETYPE_PEM) <= 0 ) {
-        ERR_print_errors_fp(stderr);
-        exit(EXIT_FAILURE);
+    if (key) {
+        if (SSL_CTX_use_PrivateKey_file(ctx, key, SSL_FILETYPE_PEM) <= 0 ) {
+            ERR_print_errors_fp(stderr);
+            exit(EXIT_FAILURE);
+        }
     }
 }
 
@@ -207,10 +214,14 @@ int main(int argc, char **argv)
     char* ws_buffer[4];
 
     int is_ipv6 = 0;
+
     union {
+        struct sockaddr sa;
         struct sockaddr_in sin;
         struct sockaddr_in6 sin6;
+        struct sockaddr_storage ss;
     } client_addr;
+
     size_t client_addr_len = sizeof(client_addr);
     memset(&client_addr, 0, client_addr_len);
 
@@ -434,6 +445,12 @@ int main(int argc, char **argv)
             close(child_control_fd[1]);
             control_fd = child_control_fd[0];
             close(listen_sock);
+
+            // send pid down the line as a four byte integer
+            uint32_t to_send = (uint32_t)getpid();
+            if (send(control_fd, (unsigned char*)(&to_send), sizeof(uint32_t), 0) < sizeof(uint32_t))
+                ABEND(333, "could not send pid down control line");
+
             break;
         }
     } else {
@@ -441,10 +458,10 @@ int main(int argc, char **argv)
         struct addrinfo* res;
         char p[10];
         sprintf(p, "%d", port);
-        if (!getaddrinfo(host, p, NULL, &res))
-            ABEND(3, "host not found");
-
-        client = socket( res->ai_family, SOCK_STREAM, 0 );
+        printf("resolving host: %.*s\n", sizeof(host), host);
+        int rc = getaddrinfo(host, p, NULL, &res);
+        if (rc)
+            ABEND(3, gai_strerror(rc));
 
         if (res->ai_addrlen > sizeof(client_addr))
             ABEND(4, "size of connect-to address exceeds address buffer");
@@ -452,13 +469,26 @@ int main(int argc, char **argv)
         memcpy(&client_addr, res->ai_addr, res->ai_addrlen);
         client_addr_len = res->ai_addrlen;
 
-        if (!connect(client, (struct sockaddr *)&client_addr, client_addr_len))
+        char connect_ip[50];
+        if (res->ai_family == AF_INET6) {
+            inet_ntop(AF_INET6, &client_addr.sin6.sin6_addr,
+                    connect_ip, sizeof(connect_ip));
+
+        } else {
+            inet_ntop(AF_INET, &client_addr.sin.sin_addr,
+                    connect_ip, sizeof(connect_ip));
+
+        }
+
+        printf("ip: %.*s\n", sizeof(connect_ip), connect_ip);
+
+        client = socket( res->ai_family, SOCK_STREAM, 0 );
+        if (connect(client, (struct sockaddr *)&client_addr, client_addr_len))
         {
             perror("Unable to connect");
             ABEND(5, "can't connect");
         }
         printf("connected\n");
-
         ws_state = -1; // this state means we need to send an upgrade request
         
     }
@@ -518,14 +548,19 @@ int main(int argc, char **argv)
     SSL_CTX *ctx;
     init_openssl();
     ctx = create_context();
-    configure_context(ctx, cert, key);
+    configure_context(ctx, is_server ? cert : NULL, is_server ? key : NULL);
+
     ssl = SSL_new(ctx);
 
-
-    SSL_set_accept_state( ssl ); 
+    if (is_server)
+        SSL_set_accept_state(ssl); 
+    else
+        SSL_set_verify(ssl, SSL_VERIFY_PEER, NULL);
+    
     BIO* rbio = BIO_new(BIO_s_mem()); /* SSL reads from, we write to. */
     BIO* wbio = BIO_new(BIO_s_mem()); /* SSL writes to, we read from. */
     SSL_set_bio(ssl, rbio, wbio);
+
 
     /* Bytes waiting to be written to socket. This is data that has been generated
     * by the SSL object, either due to encryption of user input, or, writes
@@ -557,6 +592,8 @@ int main(int argc, char **argv)
             ssl_write_buf = (char*)realloc(ssl_write_buf, ssl_write_len + bytes_read);\
             memcpy(ssl_write_buf + ssl_write_len, ssl_buf, bytes_read);\
             ssl_write_len += bytes_read;\
+            if (DEBUG)\
+                printf("flushing %d bytes\n", bytes_read);\
         }\
         else if (!BIO_should_retry(wbio))\
             GOTO_ERROR("ssl could not enqueue outward bytes", ssl_error);\
@@ -580,25 +617,26 @@ int main(int argc, char **argv)
         memcpy(ssl_encrypt_buf + ssl_encrypt_len, buf, len);\
         ssl_encrypt_len += len; \
     }
-
-
     
 
-
     for (;;) {
+        printf("loop\n");
+        if (!is_server)
+            SSL_connect(ssl);
 
         fdset[0].events &= ~POLLOUT;
         fdset[1].events = POLLIN;
 
         if (ssl_write_len > 0)
             fdset[0].events |=  POLLOUT;
-      
+     
+        printf("poll\n"); 
         int ready = poll(&fdset[0], 2, -1);
 
         if (!ready)
             continue;
 
-        
+        printf("poll fired\n"); 
         if(
             fdset[0].revents & (POLLERR | POLLHUP | POLLNVAL) ||
             read(client, ssl_buf, 0)
@@ -720,10 +758,9 @@ int main(int argc, char **argv)
         }
 
         // INCOMING DATA
-        //int it = ( ws_pending_read + ( fdset[0].revents & POLLIN != 0 ) );
         if (fdset[0].revents & POLLIN || ws_pending_read) {
-            //if (DEBUG)
-            //    printf("incoming data\n");           
+            if (DEBUG)
+                printf("incoming data\n");           
  
             if (fdset[0].revents & POLLIN)
             {
@@ -736,6 +773,8 @@ int main(int argc, char **argv)
                     GOTO_ERROR("could not write raw bytes to openssl from incoming socket", ssl_error);
                    
                 if ( !SSL_is_init_finished(ssl) ) {
+                    if (DEBUG)
+                        printf("trying to ssl handshake\n");
                     int n = SSL_do_handshake(ssl);
                     int e = SSL_get_error(ssl, n);
                     SSL_FLUSH_OUT()
@@ -1021,7 +1060,9 @@ int main(int argc, char **argv)
                         case -1:
                         {
                             // we need to send a request
- 
+                            printf("in -1!\n"); 
+
+
                             break;
                         }
                         case 0:
