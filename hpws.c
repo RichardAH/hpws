@@ -122,12 +122,13 @@ void cleanup_openssl()
     EVP_cleanup();
 }
 
-SSL_CTX *create_context()
+SSL_CTX *create_context(int is_server)
 {
     const SSL_METHOD *method;
     SSL_CTX *ctx;
 
-    method = SSLv23_server_method();
+    
+    method = ( is_server ? SSLv23_server_method() : SSLv23_method() );
 
     ctx = SSL_CTX_new(method);
     if (!ctx) {
@@ -546,38 +547,13 @@ int main(int argc, char **argv)
     // set up SSL
     SSL *ssl;
     SSL_CTX *ctx;
-    init_openssl();
-    ctx = create_context();
-    configure_context(ctx, is_server ? cert : NULL, is_server ? key : NULL);
-
-    ssl = SSL_new(ctx);
-
-    if (is_server)
-        SSL_set_accept_state(ssl); 
-    else
-        SSL_set_verify(ssl, SSL_VERIFY_PEER, NULL);
-    
-    BIO* rbio = BIO_new(BIO_s_mem()); /* SSL reads from, we write to. */
-    BIO* wbio = BIO_new(BIO_s_mem()); /* SSL writes to, we read from. */
-    SSL_set_bio(ssl, rbio, wbio);
-
-
-    /* Bytes waiting to be written to socket. This is data that has been generated
-    * by the SSL object, either due to encryption of user input, or, writes
-    * requires due to peer-requested SSL renegotiation. */
     char* ssl_write_buf;
     size_t ssl_write_len;
-
-    /* Bytes waiting to be encrypted by the SSL object. */
     char* ssl_encrypt_buf;
     size_t ssl_encrypt_len;
 
     struct pollfd fdset[2];
     memset(&fdset, 0, sizeof(fdset));
-
-    fdset[0].fd = client;
-    fdset[1].fd = control_fd;
-
     #define SSL_FAILED(x) (\
         (x) != SSL_ERROR_WANT_WRITE &&\
         (x) != SSL_ERROR_WANT_READ &&\
@@ -588,28 +564,17 @@ int main(int argc, char **argv)
       ssize_t bytes_read = 0;\
       do {\
         bytes_read = BIO_read(wbio, ssl_buf, sizeof(ssl_buf));\
+        if (DEBUG)\
+            printf("flushing %d bytes\n", bytes_read);\
         if (bytes_read > 0) {\
             ssl_write_buf = (char*)realloc(ssl_write_buf, ssl_write_len + bytes_read);\
             memcpy(ssl_write_buf + ssl_write_len, ssl_buf, bytes_read);\
             ssl_write_len += bytes_read;\
-            if (DEBUG)\
-                printf("flushing %d bytes\n", bytes_read);\
         }\
         else if (!BIO_should_retry(wbio))\
             GOTO_ERROR("ssl could not enqueue outward bytes", ssl_error);\
       } while (bytes_read > 0);\
     }
-
-    #define GOTO_ERROR(x,y)\
-        {fprintf(stderr, "error: %s\n", (x)); goto y;}
-
-    #define SSL_BUFFER_LENGTH 4096
-    char ssl_buf[SSL_BUFFER_LENGTH]; //todo: zero copy?
-
-    ssize_t bytes_read = 0, bytes_written = 0;
-    int status = 0;
-    fdset[0].events =  POLLERR | POLLHUP | POLLNVAL | POLLIN ;
-
 
     #define SSL_ENQUEUE(buf, len)\
     {\
@@ -617,12 +582,58 @@ int main(int argc, char **argv)
         memcpy(ssl_encrypt_buf + ssl_encrypt_len, buf, len);\
         ssl_encrypt_len += len; \
     }
+
+    #define GOTO_ERROR(x,y)\
+        {fprintf(stderr, "error: %s\n", (x)); goto y;}
+
+    #define SSL_BUFFER_LENGTH 4096
+    init_openssl();
+    ctx = create_context(is_server);
+    configure_context(ctx, is_server ? cert : NULL, is_server ? key : NULL);
+
+    ssl = SSL_new(ctx);
+
+    BIO* rbio = BIO_new(BIO_s_mem()); /* SSL reads from, we write to. */
+    BIO* wbio = BIO_new(BIO_s_mem()); /* SSL writes to, we read from. */
+    SSL_set_bio(ssl, rbio, wbio);
+    char ssl_buf[SSL_BUFFER_LENGTH]; //todo: zero copy?
+    ssize_t bytes_read = 0, bytes_written = 0;
+    int status = 0;
+    fdset[0].events =  POLLERR | POLLHUP | POLLNVAL | POLLIN ;
     
+    if (is_server)
+        SSL_set_accept_state(ssl); 
+    else {
+        SSL_set_connect_state(ssl);
+        if (DEBUG)
+            printf("trying to start ssl handshake\n");
+        int n = SSL_do_handshake(ssl);
+        ERR_print_errors_fp(stderr);
+        int e = SSL_get_error(ssl, n);
+        SSL_FLUSH_OUT()
+    }
+    
+    
+/*
+    if (!is_server) {
+        printf("do handshake\n");
+        int n = SSL_do_handshake(ssl);
+        int e = SSL_get_error(ssl, n);
+        
+        printf("ssl_write_len: %d - %d - %d\n", ssl_write_len, n, e);
+        SSL_FLUSH_OUT()
+        int bytes_written = write(client, ssl_write_buf, ssl_write_len);
+        printf("bytes written: %d\n", bytes_written);
+        ssl_write_len -= bytes_written;
+        ssl_write_buf = (char*)realloc(ssl_write_buf, ssl_write_len);
+    }
+*/
+
+    fdset[0].fd = client;
+    fdset[1].fd = control_fd;
 
     for (;;) {
         printf("loop\n");
-        if (!is_server)
-            SSL_connect(ssl);
 
         fdset[0].events &= ~POLLOUT;
         fdset[1].events = POLLIN;
@@ -633,10 +644,14 @@ int main(int argc, char **argv)
         printf("poll\n"); 
         int ready = poll(&fdset[0], 2, -1);
 
+        printf("polled\n");
+
         if (!ready)
             continue;
 
         printf("poll fired\n"); 
+
+
         if(
             fdset[0].revents & (POLLERR | POLLHUP | POLLNVAL) ||
             read(client, ssl_buf, 0)

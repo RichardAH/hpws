@@ -162,6 +162,12 @@ namespace hpws {
             }
         }
 
+        
+        std::optional<error> write(std::string_view to_write)  {
+
+        }
+
+
         std::optional<error> ack(std::string_view from_read)  {
             char msg[2] = { 'a', '0' };
             if (from_read.data() == buffer[1]) msg[1]++;
@@ -302,7 +308,7 @@ namespace hpws {
                 if (bytes_read < 1)
                     HPWS_CONNECT_ERROR(2, "nil message sent by hpws on startup");
 
-                if (rbuf[0] = 'r') 
+                if (rbuf[0] != 'r') 
                     HPWS_CONNECT_ERROR(3, "unexpected content in message sent by hpws client mode on startup");
                 
                 return client {

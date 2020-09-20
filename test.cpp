@@ -20,7 +20,7 @@ int main(int argc, char** argv) {
 }
 
 int example_client() {
-    auto accept_result = hpws::client::connect ( "hpws", 16*1024*1024, "echo.websocket.org", 443, {} );
+    auto accept_result = hpws::client::connect ( "hpws", 16*1024*1024, "google.com", 443, {} );
     
     if (std::holds_alternative<hpws::client>(accept_result)) {
         printf("a client connected\n");
