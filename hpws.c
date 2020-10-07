@@ -61,6 +61,7 @@
 
 #define BASE64_LEN( x ) ( x * 4 / 3 + 5 )
 unsigned char * base64_encode( unsigned char* src, size_t len, unsigned char* out, size_t out_len );
+void block_xor(unsigned char* buf, uint64_t start, uint64_t end, unsigned char* masking_key_x3);
 
 int main(int argc, char **argv)
 {
@@ -93,6 +94,7 @@ int main(int argc, char **argv)
     } client_addr;
     size_t client_addr_len = sizeof(client_addr); memset(&client_addr, 0, client_addr_len);
     int client_fd = -1, control_fd = -1, port = 443, max_con = 512, max_con_ip = 5, is_server = 1, is_ipv6 = 0;
+    int urand_fd = -1;
     char ip[40]; ip[0] = '\0';
     char host[256]; host[0] = '\0';             // this is the host as parsed from the cmdline when in client mode
     char get[256]; get[0] = '/'; get[1] = '\0'; // this is the uri to request in the upgrade message when connecting
@@ -352,6 +354,13 @@ int main(int argc, char **argv)
     if (!is_server)
     {
 
+        // as a websocket client we are required to generate masking keys
+        // so open this fd to urandom and leave it open
+        urand_fd = open("/dev/urandom", O_RDONLY);
+        if (!urand_fd)
+            ABEND(301, "could not open /dev/urandom");
+
+
         struct addrinfo* res;
         char p[10];
         snprintf(p, 10, "%d", port);
@@ -607,6 +616,7 @@ int main(int argc, char **argv)
                 case 'c': // close
                     GOTO_ERROR("control ordered close", force_closed);
                     break;
+
                 case 'a': // ack, we can unlock the specified buffer
                     {
                     if (bytes_read != 2 || ( control_msg[1] != '0' && control_msg[1] != '1' ))
@@ -621,33 +631,44 @@ int main(int argc, char **argv)
                         ws_buf_decode =  ws_buffer[unlock]; 
                     }
                     break;
-
+                
+                // ------------------------------------------------------------------------------------------------------------
+                // incoming control fd message -> outgoing websocket message
+                // ------------------------------------------------------------------------------------------------------------
                 case 'o': // outgoing frame on buffer x, of size y
-                    if (bytes_read != 7 || 
-                        ( control_msg[1] != '0' && control_msg[1] != '1' ) ||
-                        ( control_msg[2] != '0' && control_msg[2] != '1' )
+                {
+                    if (bytes_read != 6 || 
+                        ( control_msg[1] != '0' && control_msg[1] != '1' )
                     )
+                    {
+                        fprintf(stderr, 
+                                "o message received from hp:-----\n%.*s\n----------\n", bytes_read, control_msg);
                         GOTO_ERROR("received invalid 'o' message from control fd", control_error);
+                    }
                     unsigned char binary = control_msg[1] - '0';
                     int lock = control_msg[2] - '0' + 2;
                     int size = *((uint32_t*)(control_msg + 3));
+                    if (DEBUG)
+                        printf(stderr, "OUTGOING MESSAGE RECEIVED FROM HP:\n%.*s\n--------------",
+                                size, ws_buffer[lock]);
+                    // construct a websocket frame
                     {
                         unsigned char buf[16];
                         buf[0] = 0b10000000 | binary;
                         if (size < 126) {
-                            buf[1] = (char)(size);
+                            buf[1] = (char)(size) + (is_server ? 0 : 0b10000000); // set masking bit if client
                             SSL_ENQUEUE(buf, 2);
                         }
                         else if (size <= 0xffff)
                         {
-                            buf[1] = 126;
+                            buf[1] = 126 + (is_server ? 0 : 0b10000000);
                             buf[2] = ( size >> 8 ) & 0xff;
                             buf[3] = ( size >> 0 ) & 0xff;
                             SSL_ENQUEUE(buf, 4);
                         }
                         else
                         {
-                            buf[1] = 127;
+                            buf[1] = 127 + (is_server ? 0 : 0b10000000);
                             buf[2] = ( size >> 56 ) & 0xff;
                             buf[3] = ( size >> 48 ) & 0xff;
                             buf[4] = ( size >> 40 ) & 0xff;
@@ -658,6 +679,23 @@ int main(int argc, char **argv)
                             buf[9] = ( size >>  0 ) & 0xff;
                             SSL_ENQUEUE(buf, 10);
                         }
+
+                        if (!is_server) {
+                            // masking key required!
+                            unsigned char masking_key[12];
+                            if (read(urand_fd, masking_key, 4) != 4)
+                                GOTO_ERROR("could not read 4 bytes from /dev/urandom", internal_error); 
+                                SSL_ENQUEUE(masking_key, 4);
+
+                            // expand the key to 3 repeats for the block_xor
+                            for (int i = 0; i < 4; ++i) {
+                                masking_key[i + 4] = masking_key[i];
+                                masking_key[i + 8] = masking_key[i];
+                            }
+                                
+                            // XOR over the buffer
+                            block_xor(ws_buffer[lock], 0, size, masking_key);
+                        }
                      
                         SSL_ENQUEUE(ws_buffer[lock], size);
                         buf[0] = 'a';
@@ -666,6 +704,7 @@ int main(int argc, char **argv)
                             GOTO_ERROR("could not send ack to control fd", control_error);
                     }
                     break;
+                }
                 default:
                     fprintf(stderr, "unknown control message received `%*.s`\n", bytes_read, control_msg); 
                     GOTO_ERROR("unknown control message", control_error); 
@@ -804,12 +843,8 @@ int main(int argc, char **argv)
                     if ( ws_state == -2 )
                     {
                         unsigned char nonce[16];
-                        int rfd = open("/dev/urandom", O_RDONLY);
-                        if (!rfd)
-                            GOTO_ERROR("could not open /dev/urandom", ws_handshake_error);
-                        if (read(rfd, nonce, 16) != 16)
+                        if (read(urand_fd, nonce, 16) != 16)
                             GOTO_ERROR("could not read /dev/urandom", ws_handshake_error);
-                        close(rfd);
 
                         char nonce_b64[BASE64_LEN(16)];
                         if (!base64_encode(nonce, 16, nonce_b64, sizeof(nonce_b64)))
@@ -1162,33 +1197,9 @@ int main(int argc, char **argv)
                             Next perform efficient 8 byte XORs to the final 8 byte boundary
                             Finally iterate one byte at a time to the final byte boundary
                         */
+
+                        block_xor(ws_buf_decode, ws_payload_upto, ws_payload_next, ws_masking_key);
                         
-                        uint64_t i = ws_payload_upto;
-                        uint64_t start_boundary =  ws_payload_upto + (8 - (ws_payload_upto % 8));
-                        uint64_t end_boundary =  ws_payload_next - (ws_payload_next % 8);
-                        unsigned char*  restrict buf = ws_buf_decode;
-
-
-                        if (start_boundary < end_boundary)
-                        {
-
-                            for (; i < start_boundary; ++i)
-                                 *(buf + i) ^= ws_masking_key[i % 4];
-                            
-                            // this is a further optimisation since incrementing by 8 doesnt change %4
-                            uint8_t key_offset = i % 4; 
-                
-                            for(; i < end_boundary; i += 8)
-                                *(uint64_t*)(buf + i) ^=
-                                    *((uint64_t*)(ws_masking_key + key_offset));
-      
-                            for (; i < ws_payload_next; ++i) 
-                                 *(buf + i) ^= ((unsigned char*)ws_masking_key)[ i % 4 ];
-
-                        } else 
-                            for (; i < ws_payload_next; ++i)
-                                 *(buf + i) ^= ((unsigned char*)ws_masking_key)[i % 4];
-                      
                         if (ws_state != 4)
                               ws_payload_upto = ws_payload_next;
 
@@ -1304,9 +1315,11 @@ int main(int argc, char **argv)
     control_closed:;
     control_error:;
     force_closed:;
+    internal_error:;
+
 
     if (DEBUG)
-        printf("finished %d\n", getpid());
+        printf("client finished %d\n", getpid());
     close(client_fd);
     close(control_fd);
     for (int i = 0; i < 4; ++i)
@@ -1316,6 +1329,9 @@ int main(int argc, char **argv)
     SSL_free(ssl);
     free(ssl_write_buf);
     free(ssl_encrypt_buf);
+
+    if (urand_fd > -1)
+        close(urand_fd);
 
     return 0;
 }
@@ -1362,3 +1378,30 @@ unsigned char * base64_encode( unsigned char* src, size_t len, unsigned char* ou
 }
 
 
+void block_xor(unsigned char* restrict buf, uint64_t start, uint64_t end, unsigned char* masking_key_x3)
+{
+
+    uint64_t i = start;
+    uint64_t start_boundary =  start + (8 - (start % 8));
+    uint64_t end_boundary =  end - (end % 8);
+
+    if (start_boundary < end_boundary)
+    {
+
+        for (; i < start_boundary; ++i)
+             *(buf + i) ^= masking_key_x3[i % 4];
+        
+        // this is a further optimisation since incrementing by 8 doesnt change %4
+        uint8_t key_offset = i % 4; 
+
+        for(; i < end_boundary; i += 8)
+            *(uint64_t*)(buf + i) ^=
+                *((uint64_t*)(masking_key_x3 + key_offset));
+
+        for (; i < end; ++i) 
+             *(buf + i) ^= ((unsigned char*)masking_key_x3)[ i % 4 ];
+
+    } else 
+        for (; i < end; ++i)
+             *(buf + i) ^= ((unsigned char*)masking_key_x3)[i % 4];
+}

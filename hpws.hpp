@@ -48,13 +48,25 @@ namespace hpws {
         uint32_t max_buffer_size;
         bool moved = false;
         addr_t endpoint;
+        std::string get; // the get req this websocket was opened with
         int control_line_fd;
         int buffer_fd[4]; // 0 1 - in buffers, 2 3 - out buffers
+        int buffer_lock[2] = {0,0}; // this records if buffers 2 and 3 have been sent out awaiting an ack or not
         void* buffer[4];
+        int pending_read[2] = {0, 0}; // if we receive a read message in a non-read function we place the pending size
+                                      // here in position 0 if buffer 0 and position 1 if buffer 1, then when read is
+                                      // called we return immediately with the content
+        // to prevent pending buffers becoming out of order a read counter is kept incrementing for each read
+        // and when there are pending reads the counter at the time of the read is inserted into this array
+        uint64_t pending_read_counter[2] = { 0xFFFFFFFFFFFFFFFFULL, 0xFFFFFFFFFFFFFFFFULL };
+        uint64_t read_counter = 0;
+
         bool ready = false;
+        
 
         // private constructor
         client( 
+            std::string_view get,
             addr_t endpoint,
             int control_line_fd,
             uint32_t max_buffer_size,
@@ -64,7 +76,7 @@ namespace hpws {
             endpoint(endpoint),
             control_line_fd (control_line_fd),
             max_buffer_size (max_buffer_size),
-            child_pid(child_pid)
+            child_pid(child_pid), get(get)
         {
             for (int i = 0; i < 4; ++i) {
                 this->buffer[i] = buffer[i];
@@ -87,12 +99,20 @@ namespace hpws {
             max_buffer_size(old.max_buffer_size),
             endpoint(old.endpoint),
             control_line_fd(old.control_line_fd),
-            ready(old.ready)
+            ready(old.ready), get(old.get)
         {
             old.moved = true;
             for (int i = 0; i < 4; ++i) {
                 this->buffer[i] = old.buffer[i];
                 this->buffer_fd[i] = old.buffer_fd[i];
+            }
+
+            for (int i = 0; i < 2; ++i)
+            {
+                buffer_lock[i] = old.buffer_lock[i];
+                pending_read[i] = old.pending_read[i];
+                pending_read_counter[i] = old.pending_read_counter[i];
+                read_counter = old.read_counter;
             }
         }
 
@@ -111,6 +131,26 @@ namespace hpws {
                 close(control_line_fd);
             }
         } 
+
+        // RH TODO handle errors from this better
+        bool wait_ready()
+        {
+            if (ready)
+                return true;
+
+            char buf[32];                                                                                               
+            int bytes_read = 0;    
+            bytes_read = recv(control_line_fd, buf, sizeof(buf), 0);                                                    
+            if (bytes_read < 1)  {                                                                                      
+                perror("recv");                                                                                         
+                return false;                 
+            }                                                                                         
+
+            if (buf[0] == 'r')                                                                                        
+                ready = true; 
+ 
+            return ready;            
+        }
         
         std::variant<std::string_view, error> read()
         {
@@ -118,11 +158,29 @@ namespace hpws {
             char buf[32];
             int bytes_read = 0;
 
+
             read_start:;
-            bytes_read = recv(control_line_fd, buf, sizeof(buf), 0);
-            if (bytes_read < 1)  {
-                perror("recv");
-                return error { 1,  "control line could not be read" }; // todo clean up somehow?
+
+            // if during writng we got a read message it's queued as a pending read, so process that first
+            int do_pending_read = -1;
+            if (pending_read[0] || pending_read[1])
+                do_pending_read = (pending_read_counter[0] > pending_read_counter[1] ? 1 : 0);
+            
+            if (do_pending_read > -1)
+            {
+                bytes_read = pending_read[do_pending_read];
+                uint32_t len = pending_read[do_pending_read];
+                pending_read[do_pending_read] = 0;
+                pending_read_counter[do_pending_read] = 0xFFFFFFFFFFFFFFFFULL;
+                return std::string_view { (const char*)(buffer[do_pending_read]), len };
+            } else {
+
+                bytes_read = recv(control_line_fd, buf, sizeof(buf), 0);
+                if (bytes_read < 1)  {
+                    perror("recv");
+                    return error { 1,  "[read] control line could not be read" }; // todo clean up somehow?
+                }
+
             }
 
             if (buf[0] == 'r') {
@@ -136,7 +194,10 @@ namespace hpws {
             switch ( buf[0] )
             {
                 case 'o':
-                    {
+                {
+                    if (bytes_read != 6)
+                        return error { 3, "invalid buffer in 'o' command sent by hpws" };
+                    ++read_counter;
                     // there's a pending buffer for us
                     uint32_t len = *((uint32_t*)(buf+2));
                     int bufno = buf[1] - '0';
@@ -149,10 +210,18 @@ namespace hpws {
                     fprintf(stderr, "\n---\n");
                     */
                     return std::string_view { (const char*)(buffer[bufno]), len };
-                    }
-                    break;
+                }
                 case 'a':
+                {
+                    if (bytes_read != 2)
+                        return error { 4, "received an ack longer than 2 bytes" };
+                    int bufno = buf[1]-'0';
+                    if (! ( bufno == 0 || bufno == 1) )
+                        return error { 5, "received an ack with an invalid buffer, expecting 0 or 1" };
+                    // unlock the buffer
+                    buffer_lock[bufno] = 0;
                     break;
+                }
                 case 'c':
                     return error { 1000, "ws closed" };
                     break;
@@ -164,7 +233,74 @@ namespace hpws {
 
         
         std::optional<error> write(std::string_view to_write)  {
+            // check if we have any free buffers
+            if (buffer_lock[0] && buffer_lock[1])
+            {
+                // no free buffers, wait for a ack
+                char buf[32];                                                                                               
+                int bytes_read = 0;                                                                                         
+                                                                                                                        
+                w_read_start:;                                                                                                
+                bytes_read = recv(control_line_fd, buf, sizeof(buf), 0);                                                    
+                if (bytes_read < 1)  {                                                                                      
+                    perror("recv");                                                                                         
+                    return error { 1,  "[write] control line could not be read" }; // todo clean up somehow?                        
+                }                                                                                                           
+                                                                                                                            
+                if (buf[0] == 'r') {                                                                                        
+                    ready = true;                                                                                           
+                    goto w_read_start;                                                                                        
+                }                                                                                                           
+                                                                                                                            
+                if (!ready)                                                                                                 
+                    return error { 11, "received a message other than 'r' when client state not ready" };                   
+                                                                                                                        
+                switch ( buf[0] )                                                                                           
+                {                                                                                                           
+                    case 'o':                                                                                               
+                    {              
+                        if (bytes_read != 6)                                                                                     
+                            return error { 3, "invalid buffer in 'o' command sent by hpws" };                               
+                        ++read_counter;
+                        uint32_t len = *((uint32_t*)(buf+2));                                                               
+                        int bufno = buf[1] - '0';                                                                           
+                        if (bufno != 0 && bufno != 1)                                                                       
+                            return error { 3, "invalid buffer in 'o' command sent by hpws" };                               
+                        pending_read[bufno] = len;
+                        pending_read_counter[bufno] = read_counter;
+                        goto w_read_start;                                                                                            
+                    }                                                                                                   
+                    case 'a':
+                    {
+                        if (bytes_read != 2)
+                            return error { 4, "received an ack longer than 2 bytes" };
+                        int bufno = buf[1]-'0';
+                        if (! ( bufno == 0 || bufno == 1) )
+                            return error { 5, "received an ack with an invalid buffer, expecting 0 or 1" };
+                        // unlock the buffer
+                        buffer_lock[bufno] = 0;
+                        break;
+                    }    
+                    case 'c':                                                                                               
+                        return error { 1000, "ws closed" };                                                                 
+                    default:                                                                                                
+                        printf("read control message: `%.*s`\n",  bytes_read, buf);                                         
+                        return error { 2, "unknown control line command was sent by hpws" };                                                              
+                }
+            }
 
+            // execution to here ensures at least one buffer is free
+            int bufno = (buffer_lock[0] == 0 ? 2 : 3);
+            // write into the buffer
+            memcpy(buffer[bufno], to_write.data(), to_write.size());
+
+            // send the control message informing hpws that a message is ready on this buffer
+            char buf[6] = { 'o', '0' + (bufno-2), 0, 0, 0, 0};
+            *((uint32_t*)((unsigned char*)(buf + 2))) = (uint32_t) to_write.size();
+            if (::write(control_line_fd, buf, 6) != 6)
+                return error { 6, "could not write o message to control line" };
+            
+            return std::nullopt;
         }
 
 
@@ -182,6 +318,7 @@ namespace hpws {
             uint32_t max_buffer_size,
             std::string_view host, 
             uint16_t port,
+            std::string_view get,
             std::vector<std::string_view> argv  )
         {
 
@@ -196,7 +333,7 @@ namespace hpws {
             const char* error_msg = NULL;
             int fd[2] = {-1, -1}; 
             int pid = -1;            
-            int count_args = 10 + argv.size();
+            int count_args = 12 + argv.size();
             char const ** argv_pass = NULL;
 
             if (socketpair(AF_UNIX, SOCK_SEQPACKET, 0, fd))
@@ -226,6 +363,8 @@ namespace hpws {
                 argv_pass[upto++] = port_str;
                 argv_pass[upto++] = "--cntlfd";
                 argv_pass[upto++] = "3";
+                argv_pass[upto++] = "--get";
+                argv_pass[upto++] = get.data();
                 for ( std::string_view& arg : argv )
                     argv_pass[upto++] = arg.data();
                 argv_pass[upto] = NULL; 
@@ -312,6 +451,7 @@ namespace hpws {
                     HPWS_CONNECT_ERROR(3, "unexpected content in message sent by hpws client mode on startup");
                 
                 return client {
+                    get,
                     child_addr,
                     child_fd,
                     max_buffer_size,
@@ -345,10 +485,11 @@ namespace hpws {
 
                 // NB: execution to here can only happen in parent process            
                 // clean up any mess after error
-                if (pid > 0) 
+                if (pid > 0) {
                     kill(pid, SIGKILL); /* RH TODO change this to SIGTERM and set a timeout? */
                     int status;
                     waitpid(pid, &status, 0 /* should we use WNOHANG? */);
+                }
                 if (fd[0] > 0)
                     close(fd[0]);
                 if (fd[1] > 0)
@@ -462,6 +603,7 @@ namespace hpws {
             }
 
             return client {
+                "",
                 buf,
                 child_fd,
                 max_buffer_size_,
@@ -610,10 +752,11 @@ namespace hpws {
 
                 // NB: execution to here can only happen in parent process            
                 // clean up any mess after error
-                if (pid > 0) 
+                if (pid > 0) { 
                     kill(pid, SIGKILL); /* RH TODO change this to SIGTERM and set a timeout? */
                     int status;
                     waitpid(pid, &status, 0 /* should we use WNOHANG? */);
+                }
                 if (fd[0] > 0)
                     close(fd[0]);
                 if (fd[1] > 0)
