@@ -30,7 +30,7 @@
 **  Config
 ** --------------------------------------------------------------------------------------------------------------------
 */
-#define DEBUG 1
+#define DEBUG 0
 #define SSL_BUFFER_LENGTH 4096
 #define _GNU_SOURCE
 
@@ -378,7 +378,8 @@ int main(int argc, char **argv)
         struct addrinfo* res;
         char p[10];
         snprintf(p, 10, "%d", port);
-        printf("resolving host: %.*s\n", sizeof(host), host);
+        if (DEBUG)
+            fprintf(stderr, "[HPWS.C] resolving host: %.*s\n", sizeof(host), host);
         int rc = getaddrinfo(host, p, NULL, &res);
         if (rc)
             ABEND(91, gai_strerror(rc));
@@ -394,17 +395,21 @@ int main(int argc, char **argv)
             inet_ntop(AF_INET6, &client_addr.sin6.sin6_addr, connect_ip, sizeof(connect_ip));
         else 
             inet_ntop(AF_INET, &client_addr.sin.sin_addr, connect_ip, sizeof(connect_ip));
-
-        printf("ip: %.*s\n", sizeof(connect_ip), connect_ip);
+    
+        if (DEBUG)
+            fprintf(stderr, "[HPWS.C] ip: %.*s\n", sizeof(connect_ip), connect_ip);
 
         client_fd = socket( res->ai_family, SOCK_STREAM, 0 );
         if (connect(client_fd, (struct sockaddr *)&client_addr, client_addr_len))
         {
-            perror("Unable to connect");
+            perror("[HPWS.C] Unable to connect");
             ABEND(93, "can't connect");
         }
-        printf("connected\n");
-        ws_state = -2; // this state means we need to send an upgrade request
+    
+        if (DEBUG)
+            fprintf(stderr, "[HPWS.C] connected\n");
+   
+         ws_state = -2; // this state means we need to send an upgrade request
     }
 
 /*
@@ -572,7 +577,7 @@ int main(int argc, char **argv)
         else {
             SSL_set_connect_state(ssl);
             if (DEBUG)
-                printf("trying to start ssl handshake\n");
+                fprintf(stderr, "[HPWS.C] trying to start ssl handshake\n");
             int n = SSL_do_handshake(ssl);
             ERR_print_errors_fp(stderr);
             int e = SSL_get_error(ssl, n);
@@ -782,10 +787,6 @@ int main(int argc, char **argv)
                     int n = SSL_do_handshake(ssl);
                     int e = SSL_get_error(ssl, n);
                     SSL_FLUSH_OUT()
-
-                    char buf[1] = { 'r' }; // send 'ready' message
-                    if (send(control_fd, buf, 1, 0) != 1)
-                        GOTO_ERROR("could not write ready message to control fd", control_error);
                 } 
             }
             
@@ -908,6 +909,14 @@ int main(int argc, char **argv)
 
                         if (bytes_read <= 0)
                             goto skip_ws;
+
+                        if (DEBUG)
+                            fprintf(stderr, "[HPWS.C] sending ready from ws_state -1 (client mode)\n");
+
+                        char buf[1] = { 'r' }; // send 'ready' message
+                        if (send(control_fd, buf, 1, 0) != 1)
+                            GOTO_ERROR("could not write ready message to control fd", control_error);
+
                         ws_state = 1;
                         goto skip_ws;
                     }
@@ -974,6 +983,13 @@ int main(int argc, char **argv)
 
                         SSL_ENQUEUE(ws_buf_decode, bytes_to_write);
                         SSL_FLUSH_OUT()
+
+                        if (DEBUG)
+                            fprintf(stderr, "[HPWS.C] sending ready from ws_state 0 (server mode)\n");
+                        char buf[1] = { 'r' }; // send 'ready' message
+                        if (send(control_fd, buf, 1, 0) != 1)
+                            GOTO_ERROR("could not write ready message to control fd", control_error);
+
                         ws_state = 1;
                         goto skip_ws;
                     }
@@ -1269,7 +1285,9 @@ int main(int argc, char **argv)
             
 
                             uint32_t len = (uint32_t)ws_payload_next;
-                            fprintf(stderr, "[HPWS.C] sending o message: buf = %d, len = %lu\n", sending_buf, len);
+                            if (DEBUG)
+                                fprintf(stderr, "[HPWS.C] sending o message: buf = %d, len = %lu\n",
+                                        sending_buf, len);
                             unsigned char control_msg[6] = { 'o', '0' + sending_buf, 0, 0, 0, 0 };
                             ENCODE_O_SIZE(control_msg, len);
  

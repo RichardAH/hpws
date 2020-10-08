@@ -33,7 +33,7 @@
     control_msg[5] = (unsigned char) ((f >>  0) & 0xff); \
 }
 
-#define HPWS_DEBUG 1
+#define HPWS_DEBUG 0 
 
 namespace hpws {
     /*typedef enum e_retcode {
@@ -45,7 +45,7 @@ namespace hpws {
     // used when waiting for messages that should already be on the pipe
     #define HPWS_SMALL_TIMEOUT 10
     // used when waiting for server process to spawn
-    #define HPWS_LONG_TIMEOUT 1500
+    #define HPWS_LONG_TIMEOUT 2500
 
     typedef union {
         struct sockaddr sa;
@@ -77,8 +77,6 @@ namespace hpws {
         // and when there are pending reads the counter at the time of the read is inserted into this array
         uint64_t pending_read_counter[2] = { 0xFFFFFFFFFFFFFFFFULL, 0xFFFFFFFFFFFFFFFFULL };
         uint64_t read_counter = 0;
-
-        bool ready = false;
 
 
         // private constructor
@@ -117,7 +115,7 @@ namespace hpws {
             max_buffer_size(old.max_buffer_size),
             endpoint(old.endpoint),
             control_line_fd(old.control_line_fd),
-            ready(old.ready), get(old.get)
+            get(old.get)
         {
             old.moved = true;
             for (int i = 0; i < 4; ++i) {
@@ -148,29 +146,6 @@ namespace hpws {
 
                 close(control_line_fd);
             }
-        }
-
-        // RH TODO handle errors from this better
-        bool wait_ready()
-        {
-            if (ready)
-                return true;
-
-            char buf[32];
-            int bytes_read = 0;
-            bytes_read = recv(control_line_fd, buf, sizeof(buf), 0);
-            if (bytes_read < 1)  {
-                perror("recv");
-                return false;
-            }
-
-            if (buf[0] == 'r')
-            {
-                if (HPWS_DEBUG)
-                    fprintf(stderr, "[HPWS.HPP] received ready 2\n");
-                ready = true;
-            }
-            return ready;
         }
 
         std::variant<std::string_view, error> read()
@@ -207,17 +182,6 @@ namespace hpws {
 
             }
 
-            if (buf[0] == 'r') {
-                if (HPWS_DEBUG)
-                    fprintf(stderr, "[HPWS.HPP] received ready 3\n");
-                ready = true;
-                bytes_read = 0;
-                goto read_start;
-            }
-
-            if (!ready)
-                return error { 11, "received a message other than 'r' when client state not ready" };
-
             switch ( buf[0] )
             {
                 case 'o':
@@ -238,7 +202,7 @@ namespace hpws {
                     int bufno = buf[1] - '0';
                     if (bufno != 0 && bufno != 1)
                         return error { 3, "invalid buffer in 'o' command sent by hpws" };
-    
+
                     if (HPWS_DEBUG)
                     {
                         fprintf(stderr, "[HPWS.HPP] read %d\n", len);
@@ -276,23 +240,13 @@ namespace hpws {
                 char buf[32];
                 int bytes_read = 0;
 
-                w_read_start:;
+                write_start:;
                 bytes_read = recv(control_line_fd, buf, sizeof(buf), 0);
                 if (bytes_read < 1)  {
                     perror("recv");
                     return error { 1,  "[write] control line could not be read" }; // todo clean up somehow?
                 }
 
-                if (buf[0] == 'r') 
-                {
-                    if (HPWS_DEBUG)
-                        fprintf(stderr, "[HPWS.HPP] received ready 1\n");
-                    ready = true;
-                    goto w_read_start;
-                }
-
-                if (!ready)
-                    return error { 11, "received a message other than 'r' when client state not ready" };
 
                 switch ( buf[0] )
                 {
@@ -309,7 +263,7 @@ namespace hpws {
                             return error { 3, "invalid buffer in 'o' command sent by hpws" };
                         pending_read[bufno] = len;
                         pending_read_counter[bufno] = read_counter;
-                        goto w_read_start;
+                        goto write_start;
                     }
                     case 'a':
                     {
@@ -442,7 +396,7 @@ namespace hpws {
                 // timeout or error
                 if (ret < 1)
                     HPWS_CONNECT_ERROR(1, "timeout waiting for hpws connect message");
-    
+
                 if (HPWS_DEBUG)
                     fprintf(stderr, "[HPWS.HPP] waiting for addr_t\n");
                 // first thing we'll receive is the sockaddr union
@@ -454,7 +408,9 @@ namespace hpws {
                 if (bytes_read < sizeof(child_addr))
                     HPWS_CONNECT_ERROR(202, "received message on control line was not sizeof(addr_t)");
 
-                printf("waiting for buffer fds\n");
+                if (HPWS_DEBUG)
+                    fprintf(stderr, "[HPWS.HPP] waiting for buffer fds\n");
+
                 // second thing we will receive is the four fds for the buffers
                 int buffer_fd[4]  =  { -1, -1, -1, -1 };
                 void* mapping[4];
@@ -481,7 +437,9 @@ namespace hpws {
                             HPWS_CONNECT_ERROR(204, "could not mmap scm_rights passed buffer fd");
                     }
                 }
-                printf("waiting for 'r'\n");
+
+                if (HPWS_DEBUG)
+                    fprintf(stderr, "[HPWS.HPP] waiting for 'r'\n");
 
                 // now we wait for a 'r' ready message or for the socket/client to die
                 ret = poll(&pfd, 1, HPWS_LONG_TIMEOUT); // default= 1500 ms timeout
@@ -645,7 +603,27 @@ namespace hpws {
                         return error{204, "could not mmap scm_rights passed buffer fd"};
                 }
             }
+            {
+                if (HPWS_DEBUG)
+                    fprintf(stderr, "[HPWS.HPP] waiting for 'r' on accept\n");
+                struct pollfd pfd;
+                int ret;
 
+                pfd.fd = child_fd;
+                pfd.events = POLLIN;
+                // now we wait for a 'r' ready message or for the socket/client to die
+                ret = poll(&pfd, 1, HPWS_LONG_TIMEOUT); // default= 1500 ms timeout
+
+                char rbuf[1];
+                bytes_read = recv(child_fd, rbuf,sizeof(rbuf), 0);
+                if (bytes_read < 1)
+                    HPWS_ACCEPT_ERROR(2, "nil message sent by hpws on startup on accept");
+
+                if (rbuf[0] != 'r')
+                    HPWS_ACCEPT_ERROR(3, "unexpected content in message sent by hpws client mode on startup");
+            }
+
+            // RH TODO: accept needs a proper child cleanup on failure
             return client {
                 "",
                 buf,
