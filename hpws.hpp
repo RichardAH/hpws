@@ -33,6 +33,7 @@
     control_msg[5] = (unsigned char) ((f >>  0) & 0xff); \
 }
 
+#define HPWS_DEBUG 1
 
 namespace hpws {
     /*typedef enum e_retcode {
@@ -99,7 +100,8 @@ namespace hpws {
                 this->buffer_fd[i] = buffer_fd[i];
             }
 
-            printf("child constructed pid = %d\n", child_pid);
+            if (HPWS_DEBUG)
+                fprintf(stderr, "[HPWS.HPP] child constructed pid = %d\n", child_pid);
         }
 
 
@@ -164,7 +166,8 @@ namespace hpws {
 
             if (buf[0] == 'r')
             {
-                fprintf(stderr, "[HPWS.HPP] received ready 2\n");
+                if (HPWS_DEBUG)
+                    fprintf(stderr, "[HPWS.HPP] received ready 2\n");
                 ready = true;
             }
             return ready;
@@ -186,7 +189,8 @@ namespace hpws {
 
             if (do_pending_read > -1)
             {
-                fprintf(stderr, "[HPWS.HPP] pending read from buffer %d\n", do_pending_read);
+                if (HPWS_DEBUG)
+                    fprintf(stderr, "[HPWS.HPP] pending read from buffer %d\n", do_pending_read);
                 bytes_read = pending_read[do_pending_read];
                 uint32_t len = pending_read[do_pending_read];
                 pending_read[do_pending_read] = 0;
@@ -197,14 +201,15 @@ namespace hpws {
                 bytes_read = recv(control_line_fd, buf, sizeof(buf), 0);
                 if (bytes_read < 1)  {
                     perror("recv");
-                    fprintf(stderr, "[TEST.HPP] bytes received %d\n", bytes_read);
+                    fprintf(stderr, "[HPWS.HPP] bytes received %d\n", bytes_read);
                     return error { 1,  "[read] control line could not be read" }; // todo clean up somehow?
                 }
 
             }
 
             if (buf[0] == 'r') {
-                fprintf(stderr, "[HPWS.HPP] received ready 3\n");
+                if (HPWS_DEBUG)
+                    fprintf(stderr, "[HPWS.HPP] received ready 3\n");
                 ready = true;
                 bytes_read = 0;
                 goto read_start;
@@ -217,8 +222,8 @@ namespace hpws {
             {
                 case 'o':
                 {
-
-                    fprintf(stderr, "[HPWS.HPP] o message received\n");
+                    if (HPWS_DEBUG)
+                        fprintf(stderr, "[HPWS.HPP] o message received\n");
 
                     if (bytes_read != 6)
                         return error { 3, "invalid buffer in 'o' command sent by hpws" };
@@ -227,18 +232,20 @@ namespace hpws {
                     uint32_t len = 0;
                     DECODE_O_SIZE(buf, len);
 
-                    fprintf(stderr, "[HPWS.HPP] o message len: %lu\n", len);
+                    if (HPWS_DEBUG)
+                        fprintf(stderr, "[HPWS.HPP] o message len: %lu\n", len);
 
                     int bufno = buf[1] - '0';
                     if (bufno != 0 && bufno != 1)
                         return error { 3, "invalid buffer in 'o' command sent by hpws" };
-
-                    fprintf(stderr, "[TEST.HPP] read %d\n", len);
-                    /*
-                    for (uint32_t i = 0; i < len; ++i)
-                        putc(((char*)(buffer[bufno]))[i], stderr);
-                    fprintf(stderr, "\n---\n");
-                    */
+    
+                    if (HPWS_DEBUG)
+                    {
+                        fprintf(stderr, "[HPWS.HPP] read %d\n", len);
+                        for (uint32_t i = 0; i < len; ++i)
+                            putc(((char*)(buffer[bufno]))[i], stderr);
+                        fprintf(stderr, "\n---\n");
+                    }
                     return std::string_view { (const char*)(buffer[bufno]), len };
                 }
                 case 'a':
@@ -255,7 +262,7 @@ namespace hpws {
                 case 'c':
                     return error { 1000, "ws closed" };
                 default:
-                    fprintf(stderr, "[HPWS.HPP] read control message: `%.*s`\n",  bytes_read, buf);
+                    fprintf(stderr, "[HPWS.HPP] read unknown control message 1: `%.*s`\n",  bytes_read, buf);
                     return error { 2, "unknown control line command was sent by hpws" };
             }
         }
@@ -278,7 +285,8 @@ namespace hpws {
 
                 if (buf[0] == 'r') 
                 {
-                    fprintf(stderr, "[HPWS.HPP] received ready 1\n");
+                    if (HPWS_DEBUG)
+                        fprintf(stderr, "[HPWS.HPP] received ready 1\n");
                     ready = true;
                     goto w_read_start;
                 }
@@ -317,7 +325,7 @@ namespace hpws {
                     case 'c':
                         return error { 1000, "ws closed" };
                     default:
-                        printf("read control message: `%.*s`\n",  bytes_read, buf);
+                        fprintf(stderr, "[HPWS.HPP] read unknown control message 2: `%.*s`\n",  bytes_read, buf);
                         return error { 2, "unknown control line command was sent by hpws" };
                 }
             }
@@ -434,8 +442,9 @@ namespace hpws {
                 // timeout or error
                 if (ret < 1)
                     HPWS_CONNECT_ERROR(1, "timeout waiting for hpws connect message");
-
-                printf("waiting for addr_t\n");
+    
+                if (HPWS_DEBUG)
+                    fprintf(stderr, "[HPWS.HPP] waiting for addr_t\n");
                 // first thing we'll receive is the sockaddr union
                 addr_t child_addr;
 

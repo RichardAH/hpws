@@ -56,8 +56,8 @@
 **  Universal macros and prototypes
 ** --------------------------------------------------------------------------------------------------------------------
 */
-#define GOTO_ERROR(x,y) { fprintf(stderr, "goto %s, error: %s\n", #y, (x)); goto y; }
-#define ABEND(code, str) { fprintf(stderr, "%s\n", str); exit(code); }
+#define GOTO_ERROR(x,y) { fprintf(stderr, "[HPWS.C] GOTO %s, ERROR: %s\n", #y, (x)); goto y; }
+#define ABEND(code, str) { fprintf(stderr, "[HPWS.C] ABEND: %s\n", str); exit(code); }
 #define DECODE_O_SIZE(control_msg, into)\                                                                              
 {\                                                                                                                     
      into =  ((uint32_t)control_msg[2] << 24) + ((uint32_t)control_msg[3] << 16) +\                                    
@@ -169,7 +169,7 @@ int main(int argc, char **argv)
         while (getopt_long_only(argc, argv, "", long_options, &option_index) != -1)
         {
             if (DEBUG)
-                printf("processing option: %d-%s\n", option_index, long_options[option_index].name);
+                fprintf(stderr, "[HPWS.C] processing option: %d-%s\n", option_index, long_options[option_index].name);
             switch(option_index) {
                 case 0:
                     hpws_mode |= 1;
@@ -213,7 +213,7 @@ int main(int argc, char **argv)
         }
 
         if (DEBUG)
-            printf("hpws mode: %d\n", hpws_mode);
+            fprintf(stderr, "[HPWS.C] hpws mode: %d\n", hpws_mode);
         
         if (hpws_mode <= 0)
             ABEND(20, "must specify either --client or --server");
@@ -445,7 +445,7 @@ int main(int argc, char **argv)
             }
             ws_buffer[i] = mapping;
             if (DEBUG)
-                printf("fd %d: %d - %x\n", i, ws_buffer_fd[i], mapping);   
+                fprintf(stderr, "[HPWS.C] buffer %d maps to fd %d and address %x\n", i, ws_buffer_fd[i], mapping); 
         }
 
         ws_buf_decode = ws_buffer[0];
@@ -466,7 +466,7 @@ int main(int argc, char **argv)
             ABEND(100, "could not send client_addr to control fd");
 
         if (DEBUG)
-            printf("connection established\n");
+            fprintf(stderr, "[HPWS.C] connection established\n");
 
              
         // second thing the new client does is send its buffer fd's to the control line
@@ -514,7 +514,7 @@ int main(int argc, char **argv)
           do {\
             bytes_read = BIO_read(wbio, ssl_buf, sizeof(ssl_buf));\
             if (DEBUG)\
-                printf("flushing %d bytes\n", bytes_read);\
+                fprintf(stderr, "[HPWS.C] flushing %d bytes\n", bytes_read);\
             if (bytes_read > 0) {\
                 ssl_write_buf = (char*)realloc(ssl_write_buf, ssl_write_len + bytes_read);\
                 memcpy(ssl_write_buf + ssl_write_len, ssl_buf, bytes_read);\
@@ -597,10 +597,14 @@ int main(int argc, char **argv)
         if (ssl_write_len > 0)
             fdset[0].events |=  POLLOUT;
 
-        fprintf(stderr, "polling\n");     
+        if (DEBUG)
+            fprintf(stderr, "[HPWS.C] polling\n");     
+
         if (!poll(&fdset[0], 2, -1))
             continue;
-        fprintf(stderr, "poll returned\n");
+
+        if (DEBUG)
+            fprintf(stderr, "[HPWS.C] poll returned\n");
 
         // check for errors in the socket
         if (fdset[0].revents & (POLLERR | POLLHUP | POLLNVAL) || read(client_fd, ssl_buf, 0))
@@ -608,7 +612,7 @@ int main(int argc, char **argv)
             int error = 0;
             socklen_t errlen = sizeof(error);
             getsockopt(client_fd, SOL_SOCKET, SO_ERROR, (void *)&error, &errlen);
-            fprintf(stderr, "socket error: %d\n", error);
+            fprintf(stderr, "[HPWS.C] socket error: %d\n", error);
             GOTO_ERROR("websocket err hup nval", client_closed);   
         }
 
@@ -625,8 +629,9 @@ int main(int argc, char **argv)
             unsigned char control_msg[12];
             int bytes_read = recv(control_fd, control_msg, sizeof(control_msg), 0);
             if (bytes_read < 1)
-                GOTO_ERROR("received invalid control message or control fd has broken or closed", control_closed);
-                
+                GOTO_ERROR("received invalid control message or control fd has broken or closed",
+                           control_closed);
+
             switch (*control_msg)
             {
                 case 'c': // close
@@ -635,16 +640,16 @@ int main(int argc, char **argv)
 
                 case 'a': // ack, we can unlock the specified buffer
                     {
-                    if (bytes_read != 2 || ( control_msg[1] != '0' && control_msg[1] != '1' ))
-                        GOTO_ERROR("received invalid 'c' message from control fd", control_error);
-                    
-                    if (DEBUG)
-                        printf("received ack for buffer %c\n", control_msg[1]);
+                        if (bytes_read != 2 || (control_msg[1] != '0' && control_msg[1] != '1'))
+                            GOTO_ERROR("received invalid 'c' message from control fd", control_error);
+                        
+                        if (DEBUG)
+                            printf("[HPWS.C] received ack for buffer %c\n", control_msg[1]);
 
-                    int unlock = control_msg[1] - '0';
-                    ws_buffer_lock[unlock] = 0;
-                    if (ws_buf_decode == NULL)
-                        ws_buf_decode =  ws_buffer[unlock]; 
+                        int unlock = control_msg[1] - '0';
+                        ws_buffer_lock[unlock] = 0;
+                        if (ws_buf_decode == NULL)
+                            ws_buf_decode =  ws_buffer[unlock]; 
                     }
                     break;
                 
@@ -655,7 +660,7 @@ int main(int argc, char **argv)
                 {
                     if (bytes_read != 6 || (control_msg[1] != '0' && control_msg[1] != '1'))
                     {
-                        fprintf(stderr, "invalid o message received from hp:-----\n%.*s\n----------\n",
+                        fprintf(stderr, "[HPWS.C] invalid o message received from hp:-----\n%.*s\n----------\n",
                                 bytes_read, control_msg);
                         GOTO_ERROR("received invalid 'o' message from control fd", control_error);
                     }
@@ -665,7 +670,7 @@ int main(int argc, char **argv)
                     DECODE_O_SIZE(control_msg, size);
 
                     if (DEBUG)
-                        fprintf(stderr, "OUTGOING MESSAGE RECEIVED FROM HP:\n%.*s\n--------------",
+                        fprintf(stderr, "[HPWS.C] outgoing ws message from hp:\n%.*s\n--end message--\n",
                                 size, ws_buffer[lock]);
                     // construct a websocket frame
                     {
@@ -725,7 +730,8 @@ int main(int argc, char **argv)
                     break;
                 }
                 default:
-                    fprintf(stderr, "unknown control message received `%*.s`\n", bytes_read, control_msg); 
+                    fprintf(stderr, "[HPWS.C] unknown control message received `%*.s`\n",
+                            bytes_read, control_msg); 
                     GOTO_ERROR("unknown control message", control_error); 
             }
             
@@ -738,7 +744,7 @@ int main(int argc, char **argv)
         {
             bytes_written = write(client_fd, ssl_write_buf, ssl_write_len);
             if (DEBUG)
-                printf("outgoing data %ld\n", bytes_written);
+                fprintf(stderr, "[HPWS.C] outgoing data %ld\n", bytes_written);
             if (bytes_written <= 0)
                 GOTO_ERROR("unable to write encrypted bytes to socket", ssl_error); 
             if (bytes_written < ssl_write_len)
@@ -755,7 +761,7 @@ int main(int argc, char **argv)
         {
 
             if (DEBUG)
-                printf("incoming data\n");           
+                fprintf(stderr, "[HPWS.C] incoming data\n");           
 
             // either we're here because there is fresh data on the socket that needs to be ingested by SSL or we're
             // here because we already did that previously but there was no free buffer to decode into this branch is
@@ -772,7 +778,7 @@ int main(int argc, char **argv)
                    
                 if ( !SSL_is_init_finished(ssl) ) {
                     if (DEBUG)
-                        printf("trying to ssl handshake\n");
+                        fprintf(stderr, "[HPWS.C] trying to ssl handshake\n");
                     int n = SSL_do_handshake(ssl);
                     int e = SSL_get_error(ssl, n);
                     SSL_FLUSH_OUT()
@@ -802,7 +808,7 @@ int main(int argc, char **argv)
                 #define WS_STORE_MASKING_KEY( masking_key, buf, o )\
                 {\
                     if (DEBUG)\
-                        printf("storing masking key %08X\n", *((uint32_t*)(&buf[o])));\
+                        fprintf("[HPWS.C] storing masking key %08X\n", *((uint32_t*)(&buf[o])));\
                     for (int i = 0; i < 12; ++i)\
                         masking_key[i] = buf[ o + (i % 4)];\
                 }
@@ -811,7 +817,7 @@ int main(int argc, char **argv)
                 {\
                     if (!ws_sent_close_frame) {\
                         if (DEBUG)\
-                            printf("sending close frame %d %s\n", reason_code, reason_string);\
+                            fprintf("[HPWS.C] sending close frame %d %s\n", reason_code, reason_string);\
                         unsigned char buf[127];\
                         buf[0] = 0b10001000;\
                         buf[1] = (char)(reason_string ?\
@@ -829,7 +835,7 @@ int main(int argc, char **argv)
                 #define WS_SEND_TEXT_FRAME( reason_string )\
                 {\
                     if (DEBUG)\
-                        printf("sending test frame `%s`\n", reason_string);\
+                        fprintf(stderr, "[HPWS.C] sending test frame `%s`\n", reason_string);\
                     unsigned char buf[127];\
                     buf[0] = 0b10000001;\
                     buf[1] =  sizeof(reason_string)-1 > 125 ? 125 : sizeof(reason_string)-1;\
@@ -851,7 +857,7 @@ int main(int argc, char **argv)
                     {
                         ws_pending_read = 1;
                         if (DEBUG)
-                            printf("skipping websocket  read because there are no free buffers\n");
+                            fprintf(stderr, "[HPWS.C] skipping websocket  read because there are no free buffers\n");
                         goto skip_ws;
                     }
 
@@ -880,10 +886,9 @@ int main(int argc, char **argv)
                         if (!(snprintf_result > 0 && snprintf_result < sizeof(request)))
                             GOTO_ERROR("websocket upgrade request longer than buffer, could not connect", 
                                         ws_handshake_error);
-                        if (DEBUG)
-                            printf("- outgoing websocket upgrade request -\n%s-----------------------------", 
-                                   request);
-                        printf("snprintf_result %d\n", snprintf_result); 
+                        if (DEBUG) 
+                            fprintf(stderr, "[HPWS.C] outgoing websocket upgrade request\n%s--end of request--\n", 
+                                    request);
                         SSL_ENQUEUE(request, snprintf_result);
                         SSL_FLUSH_OUT();
 
@@ -898,7 +903,9 @@ int main(int argc, char **argv)
                         // todo: handle edge case where ws data comes in directly following upgrade, in the same packet
                         int bytes_read = SSL_read( ssl, ws_buf_decode, ws_buffer_length - 1 );
                         if (DEBUG)
-                            fprintf(stderr, "--bytes read: %d\n--\n%.*s\n--\n", bytes_read, bytes_read, ws_buf_decode); 
+                            fprintf(stderr, "[HPWS.C] ws_state -1: bytes read: %d\n--\n%.*s\n--\n",
+                                    bytes_read, bytes_read, ws_buf_decode); 
+
                         if (bytes_read <= 0)
                             goto skip_ws;
                         ws_state = 1;
@@ -911,7 +918,7 @@ int main(int argc, char **argv)
                         // todo: should we loop to ensure a complete http request?
                         int bytes_read = SSL_read( ssl, ws_buf_decode, ws_buffer_length - 1 );
                         if (DEBUG)
-                            fprintf(stderr, "--bytes read: %d\n", bytes_read); 
+                            fprintf(stderr, "[HPWS.C] ws_state -2: bytes read: %d\n", bytes_read); 
                         if (bytes_read <= 0)
                             goto skip_ws;
                         ws_buf_decode[bytes_read-1] = '\0';
@@ -940,10 +947,11 @@ int main(int argc, char **argv)
                                 lineend > found; --lineend);
 
                         // now concatenate our magic string to the end if there is space
-                        if ( ws_buffer_length - ( lineend - ws_buf_decode ) <= sizeof(magic_string) )
-                            GOTO_ERROR("unable to conat magic string during ws handshake", ws_handshake_error);
+                        if (ws_buffer_length - ( lineend - ws_buf_decode ) <= sizeof(magic_string))
+                            GOTO_ERROR("unable to conat magic string during ws handshake",
+                                       ws_handshake_error);
 
-                        strcpy( lineend, magic_string );
+                        strcpy(lineend, magic_string);
                         
                         // compute SHA1 of the magic string
                         unsigned char hash [ SHA_DIGEST_LENGTH ];
@@ -1024,7 +1032,8 @@ int main(int argc, char **argv)
                         // check mask flag is present
                         ws_masking_flag = (ws_buf_header[1] >> 7);
 
-                        fprintf(stderr, "[HPWS.C] ws_masking_flag = %d\n", ws_masking_flag);
+                        if (DEBUG)
+                            fprintf(stderr, "[HPWS.C] ws_masking_flag = %d\n", ws_masking_flag);
 
                         if (is_server && !ws_masking_flag)
                             WS_PROTOCOL_ERROR("masking flag nil but other end is a client");
@@ -1034,11 +1043,12 @@ int main(int argc, char **argv)
 
                         if (DEBUG) 
                         {
-                            printf("ws header: bytes_read %d ws_opcode %d ws_fin %d ws_preliminary_size %d\n",
-                                ws_multi_frame_total_bytes_received, ws_opcode, ws_fin,  ws_preliminary_size );
+                            fprintf(stderr, "[HPWS.C] ws header: bytes_read %d ws_opcode %d ws_fin %d"
+                                    "ws_preliminary_size %d\n", ws_multi_frame_total_bytes_received, ws_opcode,
+                                    ws_fin,  ws_preliminary_size );
 
-                            printf("raw header: `%.*s`\n", 14, ws_buf_header);
-                            printf("opcode: %d\n", ws_opcode);
+                            fprintf(stderr, "[HPWS.C] raw header: `%.*s`\n", 14, ws_buf_header);
+                            fprintf(stderr, "[HPWS.C] opcode: %d\n", ws_opcode);
                         }
                         switch (ws_opcode) {
                             case 0: // continuation frame
@@ -1064,7 +1074,7 @@ int main(int argc, char **argv)
                                     WS_AT_LEAST(ws_preliminary_size, ws_multi_frame_total_bytes_received, 
                                                 ws_wait_for_bytes);
                                     if (DEBUG)
-                                        printf("ping/pong frame\n");
+                                        fprintf(stderr, "[HPWS.C] ping/pong frame\n");
                                     if (ws_opcode == 9) {        
                                         ws_buf_header[0]++; // its a pong!
                                         if (!ws_sent_close_frame)
@@ -1093,8 +1103,8 @@ int main(int argc, char **argv)
                         int header_size = 0;
                         if (ws_preliminary_size == 126) {
                             if (DEBUG)
-                                printf("[[PATH A]]  %02X %02X %02X %02X\n", ws_buf_header[0], ws_buf_header[1],
-                                        ws_buf_header[2], ws_buf_header[3]);
+                                fprintf(stderr, "[HPWS.C] PATH A  %02X %02X %02X %02X\n", ws_buf_header[0],
+                                        ws_buf_header[1], ws_buf_header[2], ws_buf_header[3]);
                             header_size = 4 + ( ws_masking_flag ? 4 : 0 ); 
                             WS_AT_LEAST(header_size, ws_multi_frame_total_bytes_received, ws_wait_for_bytes);
                             ws_payload_bytes_expected=  
@@ -1102,10 +1112,11 @@ int main(int argc, char **argv)
                             if (ws_masking_flag)
                                 WS_STORE_MASKING_KEY(ws_masking_key, ws_buf_header, 4);
                             if (DEBUG)
-                                printf("ws_payload_bytes_expected %lu\n", ws_payload_bytes_expected);
+                                fprintf(stderr, "[HPWS.C] ws_payload_bytes_expected %lu\n",
+                                        ws_payload_bytes_expected);
                         } else if (ws_preliminary_size == 127) {
                             if (DEBUG)
-                                printf("[[PATH B]]\n");
+                                fprintf(stderr, "[HPWS.C] PATH B\n");
                             header_size = 10 + ( ws_masking_flag ? 4 : 0 ); 
                             WS_AT_LEAST(header_size, ws_multi_frame_total_bytes_received, ws_wait_for_bytes);
                             ws_payload_bytes_expected = 
@@ -1117,7 +1128,7 @@ int main(int argc, char **argv)
                                 WS_STORE_MASKING_KEY(ws_masking_key, ws_buf_header, 10);
                         } else {
                             if (DEBUG)
-                                printf("[[PATH C]]\n");
+                                fprintf(stderr, "[HPWS.C] PATH C\n");
                             header_size = 2 + ( ws_masking_flag ? 4 : 0 );
                             WS_AT_LEAST(header_size, ws_multi_frame_total_bytes_received, ws_wait_for_bytes);
                             ws_payload_bytes_expected = ws_preliminary_size;
@@ -1126,13 +1137,13 @@ int main(int argc, char **argv)
                         }          
                     
                         if (DEBUG)
-                            printf("payload bytes expected:  %d\n",ws_payload_bytes_expected); 
+                            fprintf(stderr, "[HPWS.C] payload bytes expected:  %d\n",ws_payload_bytes_expected); 
 
                         // memcpy unused or extra header bytes (which are actually payload) into ws_buf_decode
                         if (ws_multi_frame_total_bytes_received > header_size) {
                             size_t copied_payload = ws_multi_frame_total_bytes_received - header_size;
                             if (DEBUG)
-                                printf("copying %d bytes of payload\n", copied_payload);
+                                fprintf(stderr, "[HPWS.C] copying %d bytes of payload\n", copied_payload);
                             memcpy( ws_buf_decode + ws_payload_upto, ws_buf_header + header_size, copied_payload );
                             ws_back_read = copied_payload;
                         } 
@@ -1146,9 +1157,7 @@ int main(int argc, char **argv)
                     // in this state we are reading payload and decoding it according to masking key
                     if (ws_state == 3)
                     {
-
                         ws_pending_read = 0;
-
                         ws_payload_bytes_remaining =
                             ws_payload_bytes_expected - ws_payload_upto;
                         
@@ -1178,8 +1187,8 @@ int main(int argc, char **argv)
                         }
                         
                         if (DEBUG)
-                            printf("== bytes read : %d\n== payload_bytes_remaining: %d\n",
-                                    ws_read_result, ws_payload_bytes_remaining );
+                            fprintf(stderr, "[HPWS.C] ws_state = 3: bytes read : %d\n== "
+                                    "payload_bytes_remaining: %d\n", ws_read_result, ws_payload_bytes_remaining );
                
                         // there can be overshoot due to backread,
                         // so in this scenario we copy back into header buf
@@ -1187,7 +1196,8 @@ int main(int argc, char **argv)
                         if ( ws_payload_bytes_remaining < ws_read_result ) {
                             int spare_header_bytes =  ( ws_read_result - ws_payload_bytes_remaining );
                             if (DEBUG)
-                                printf("== copying spare header bytes %d\n", spare_header_bytes);
+                                fprintf(stderr, "[HPWS.C] ws_state = 3: copying spare header bytes %d\n",
+                                        spare_header_bytes);
                             if (spare_header_bytes > 14)
                                 // this should never happen but catch it incase some bug makes it happen
                                 WS_PROTOCOL_ERROR( "could not back-backcopy header bytes from decode buffer, "
@@ -1197,32 +1207,23 @@ int main(int argc, char **argv)
                                     ws_payload_bytes_remaining, spare_header_bytes );  
 
                             ws_read_result = ws_payload_bytes_remaining;
-
                             ws_header_back_read = spare_header_bytes;
                         }
 
                         ws_multi_frame_total_bytes_received += ws_read_result;
-                            
                         ws_payload_next = ws_read_result + ws_payload_upto;
-
                         if (ws_read_result >= ws_payload_bytes_remaining) {
                             if (DEBUG)
-                                printf("[[PATH 1]]\n");
+                                fprintf(stderr, "[HPWS.C] PATH 1\n");
                             ws_payload_next = ws_payload_bytes_remaining + ws_payload_upto;
                             ws_state = 4;
                         }         
 
                         if (DEBUG)
-                            printf("masking key loop:  %08X - offset: %d, %d - %d, "
+                            fprintf(stderr, "[HPWS.C] ws_state = 3: masking key loop:  %08X - offset: %d, %d - %d, "
                                    "(total)ws_multi_frame_total_bytes_received: %d\n",
                                 (*(uint32_t*)(ws_masking_key)), (ws_payload_upto % 4), ws_payload_upto,
                                 ws_payload_next, ws_multi_frame_total_bytes_received);
-                        /*
-                            Efficient XOR processing loop
-                            First iterate to an 8 byte boundary one byte a time
-                            Next perform efficient 8 byte XORs to the final 8 byte boundary
-                            Finally iterate one byte at a time to the final byte boundary
-                        */
 
                         if (ws_masking_key)
                             block_xor(ws_buf_decode, ws_payload_upto, ws_payload_next, ws_masking_key);
@@ -1246,8 +1247,9 @@ int main(int argc, char **argv)
                                 int to_print = 20;
                                 if ((int)ws_payload_bytes_expected < to_print)
                                     to_print = (int)ws_payload_bytes_expected;
-                                printf(
-                                        "(%05d: %02d/%02d - %d offset: %d packet: `%.*s`%s`%.*s`\n", 
+                                fprintf(stderr,
+                                        "[HPWS.C] ws_state = 4: (%05d: %02d/%02d - %d offset: %d packet: "
+                                        "`%.*s`%s`%.*s`\n", 
                                         line++,
                                         ws_payload_bytes_remaining,
                                         ws_payload_bytes_expected, 
@@ -1272,7 +1274,7 @@ int main(int argc, char **argv)
                             ENCODE_O_SIZE(control_msg, len);
  
                             if (DEBUG)
-                                printf("sending o msg len: %d\n", ws_payload_next);
+                                fprintf(stderr, "[HPWS.C] sending o msg len: %d\n", ws_payload_next);
 
                             send(control_fd, control_msg, 6, 0);
                             // do the buffer swap
@@ -1296,7 +1298,7 @@ int main(int argc, char **argv)
 
                     if (ws_state > 4 || ws_state < -2) 
                     {
-                        WS_SEND_CLOSE_FRAME(1001, "Internal error");
+                        WS_SEND_CLOSE_FRAME(1001, "internal error");
                         GOTO_ERROR("ws internal error", ws_protocol_error);
                     }
                 }
@@ -1307,7 +1309,8 @@ int main(int argc, char **argv)
 
             goto skip_ws_;
             skip_ws:;
-                fprintf(stderr, "<==> jumped to skip_ws\n");
+            if (DEBUG)
+                fprintf(stderr, "[HPWS.C] <==> jumped to skip_ws\n");
             skip_ws_:;
 
         }
@@ -1338,11 +1341,13 @@ int main(int argc, char **argv)
             if (bytes_written == 0)
               break;
         }
-            
-        fprintf(stderr, "end of event loop, back to start\n");    
+
+        if (DEBUG) 
+            fprintf(stderr, "[HPWS.C] end of event loop, back to start\n");    
     }
 
-    fprintf(stderr, "main event loop ended\n");
+    if (DEBUG)
+        fprintf(stderr, "[HPWS.C] main event loop ended\n");
 
     ws_handshake_error:;
     ws_protocol_error:;
@@ -1357,7 +1362,8 @@ int main(int argc, char **argv)
 
 
     if (DEBUG)
-        printf("client finished %d\n", getpid());
+        fprintf(stderr, "[HPWS.C] client finished %d\n", getpid());
+
     close(client_fd);
     close(control_fd);
     for (int i = 0; i < 4; ++i)
@@ -1418,6 +1424,12 @@ unsigned char * base64_encode( unsigned char* src, size_t len, unsigned char* ou
 
 void block_xor(unsigned char* restrict buf, uint64_t start, uint64_t end, unsigned char* masking_key_x3)
 {
+    /*
+        Efficient XOR processing loop
+        First iterate to an 8 byte boundary one byte a time
+        Next perform efficient 8 byte XORs to the final 8 byte boundary
+        Finally iterate one byte at a time to the final byte boundary
+    */
 
     uint64_t i = start;
     uint64_t start_boundary =  start + (8 - (start % 8));
