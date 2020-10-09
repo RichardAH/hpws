@@ -529,7 +529,7 @@ namespace hpws {
         }
 
 
-        std::variant<client, error> accept()
+        std::variant<client, error> accept(const bool no_block = false)
         {
             #define HPWS_ACCEPT_ERROR(code, msg)\
                 { return error {code, msg}; }
@@ -541,6 +541,22 @@ namespace hpws {
                 char cmsgbuf[CMSG_SPACE(sizeof(int))];
                 child_msg.msg_control = cmsgbuf;
                 child_msg.msg_controllen = sizeof(cmsgbuf);
+
+                // If no-block is specified, we first check any bytes available on control fd
+                // before attempting to do a blocking a read.
+                if (no_block)
+                {
+                    struct pollfd master_pfd;
+                    master_pfd.fd = this->master_control_fd_;
+                    master_pfd.events = POLLIN;
+                    const int master_poll_result = poll(&master_pfd, 1, HPWS_SMALL_TIMEOUT);
+                    
+                    if (master_poll_result == -1) // 1 ms timeout
+                        HPWS_ACCEPT_ERROR(200, "poll failed on master control line");
+                    
+                    if (master_poll_result == 0) // No data available
+                        HPWS_ACCEPT_ERROR(199, "no new client available");
+                }
 
                 int bytes_read =
                     recvmsg(this->master_control_fd_, &child_msg, 0);
