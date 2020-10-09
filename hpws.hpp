@@ -17,6 +17,7 @@
 #include <string.h>
 #include <fcntl.h>
 #include <sys/wait.h>
+#include <netdb.h>
 
 #define DECODE_O_SIZE(control_msg, into)\
 {\
@@ -146,6 +147,13 @@ namespace hpws {
 
                 close(control_line_fd);
             }
+        }
+
+        std::string host_address()
+        {
+            char hostname[NI_MAXHOST];
+            getnameinfo((sockaddr *)&endpoint, sizeof(sockaddr), hostname, sizeof(hostname), NULL, 0, NI_NUMERICHOST);
+            return hostname;
         }
 
         std::variant<std::string_view, error> read()
