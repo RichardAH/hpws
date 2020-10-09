@@ -1,9 +1,8 @@
 #include <signal.h>
 #include <sys/wait.h>
 #include <sys/resource.h>
-
 #include <variant>
-    #include <vector>
+#include <vector>
 #include "hpws.hpp"
 
 
@@ -69,7 +68,7 @@ int example_client() {
 
             std::string_view s = std::get<std::string_view>(read_result);
             
-            fprintf(stderr, "[TEST.CPP] got message from hpws: `%.*s`\n", s.size(), s.data());
+            fprintf(stderr, "[TEST.CPP] got message from hpws: `%.*s`\n", (int)s.size(), s.data());
             //fprintf(stderr, "[TEST.CPP] got message size: %d\n", s.size());
             fprintf(stderr, "[TEST.CPP] buf contained: `");
             for (int i = 0; i < s.size(); ++i)
@@ -115,8 +114,8 @@ int example_server() {
             std::string_view s = std::get<std::string_view>(read_result);
             
             //printf("got message from hpws: `%.*s`\n", s.size(), s.data());
-            fprintf(stderr, "[TEST.CPP] %.*s", s.size(), s.data());
-            fprintf(stderr, "[TEST.CPP] got message size: %d\n", s.size());
+            fprintf(stderr, "[TEST.CPP] %.*s", (int)s.size(), s.data());
+            fprintf(stderr, "[TEST.CPP] got message size: %d\n", (int)s.size());
             fprintf(stderr, "[TEST.CPP] contained: `");
             for (int i = 0; i < s.size(); ++i)
                 putc(s[i], stderr);

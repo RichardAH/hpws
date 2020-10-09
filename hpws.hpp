@@ -2,7 +2,7 @@
 #define HPWS_INCLUDE
 #include <signal.h>
 #include <poll.h>
-
+#include <sys/types.h>
 #include <variant>
 #include <optional>
 #include <alloca.h>
@@ -197,7 +197,7 @@ namespace hpws {
                     DECODE_O_SIZE(buf, len);
 
                     if (HPWS_DEBUG)
-                        fprintf(stderr, "[HPWS.HPP] o message len: %lu\n", len);
+                        fprintf(stderr, "[HPWS.HPP] o message len: %u\n", len);
 
                     int bufno = buf[1] - '0';
                     if (bufno != 0 && bufno != 1)
@@ -291,7 +291,7 @@ namespace hpws {
 
             // send the control message informing hpws that a message is ready on this buffer
             uint32_t len = to_write.size();
-            char buf[6] = { 'o', '0' + (bufno-2), 0, 0, 0 ,0 };
+            char buf[6] = { 'o', (char)('0' + (bufno-2)), 0, 0, 0 ,0 };
             ENCODE_O_SIZE(buf, len);
 
             if (::write(control_line_fd, buf, 6) != 6)
@@ -581,7 +581,7 @@ namespace hpws {
                 return error{202, "timeout waiting for hpws accept child message"};
 
             // first thing we'll receive is the pid of the client
-            uint32_t pid = 0;
+            pid_t pid = 0;
             if (recv(child_fd, (unsigned char*)(&pid), sizeof(pid), 0) < sizeof(pid))
                 HPWS_ACCEPT_ERROR(212, "did not receive expected 4 byte pid of child process on accept");
 
