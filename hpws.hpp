@@ -149,7 +149,7 @@ namespace hpws {
             }
         }
 
-        std::string host_address()
+        const std::string host_address()
         {
             char hostname[NI_MAXHOST];
             getnameinfo((sockaddr *)&endpoint, sizeof(sockaddr), hostname, sizeof(hostname), NULL, 0, NI_NUMERICHOST);
