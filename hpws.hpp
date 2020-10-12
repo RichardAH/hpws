@@ -153,10 +153,13 @@ namespace hpws {
             }
         }
 
-        const std::string host_address()
+        const std::variant<std::string, error> host_address()
         {
             char hostname[NI_MAXHOST];
-            getnameinfo((sockaddr *)&endpoint, sizeof(sockaddr), hostname, sizeof(hostname), NULL, 0, NI_NUMERICHOST);
+            const int ret = getnameinfo((sockaddr *)&endpoint, sizeof(sockaddr), hostname, sizeof(hostname), NULL, 0, NI_NUMERICHOST);
+            if (ret != 0)
+                return error { 10,  gai_strerror(ret) };
+ 
             return hostname;
         }
 
