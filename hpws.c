@@ -62,8 +62,6 @@
 {\                                                                                                                     
      into =  ((uint32_t)control_msg[2] << 24) + ((uint32_t)control_msg[3] << 16) +\                                    
              ((uint32_t)control_msg[4] <<  8) + ((uint32_t)control_msg[5] <<  0);\
-     fprintf(stderr, "DECODE_O_SIZE %02X%02X%02X%02X\n",\
-        control_msg[2], control_msg[3], control_msg[4], control_msg[5]);\
 }                                                                                                                      
                                                                                                                        
 #define ENCODE_O_SIZE(control_msg, from)\                                                                              
@@ -72,9 +70,7 @@
     control_msg[2] = (unsigned char) ((f >> 24) & 0xff); \                                                             
     control_msg[3] = (unsigned char) ((f >> 16) & 0xff); \                                                             
     control_msg[4] = (unsigned char) ((f >>  8) & 0xff); \                                                             
-    control_msg[5] = (unsigned char) ((f >>  0) & 0xff); \                                                             
-    fprintf(stderr, "ENCODE_O_SIZE %02X%02X%02X%02X\n",\
-        control_msg[2], control_msg[3], control_msg[4], control_msg[5]);\
+    control_msg[5] = (unsigned char) ((f >>  0) & 0xff); \
 }     
 
 #define BASE64_LEN( x ) ( x * 4 / 3 + 5 )
