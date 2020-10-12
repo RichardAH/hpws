@@ -166,7 +166,7 @@ namespace hpws {
         std::variant<std::string_view, error> read()
         {
 
-            char buf[32];
+            unsigned char buf[32];
             int bytes_read = 0;
 
 
@@ -252,7 +252,7 @@ namespace hpws {
             if (buffer_lock[0] && buffer_lock[1])
             {
                 // no free buffers, wait for a ack
-                char buf[32];
+                unsigned char buf[32];
                 int bytes_read = 0;
 
                 write_start:;
