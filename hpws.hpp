@@ -61,7 +61,7 @@ namespace hpws {
     class client {
 
     private:
-        uint32_t child_pid = 0;  // if this client was created by a connect this is set
+        pid_t child_pid = 0;  // if this client was created by a connect this is set
         // this value can't be changed once it's established between the processes
         uint32_t max_buffer_size;
         bool moved = false;
@@ -86,7 +86,7 @@ namespace hpws {
             addr_t endpoint,
             int control_line_fd,
             uint32_t max_buffer_size,
-            int child_pid,
+            pid_t child_pid,
             int buffer_fd[4],
             void* buffer[4]) :
             endpoint(endpoint),
@@ -137,8 +137,12 @@ namespace hpws {
             if (!moved) {
 
                 // RH TODO ensure this pid terminates by following up with a SIGKILL
-                if (child_pid > -1)
+                if (child_pid > 0)
+                {
                     kill(child_pid, SIGTERM);
+                    int status;
+                    waitpid(child_pid, &status, 0 /* should we use WNOHANG? */);
+                }
 
                 for (int i = 0; i < 4; ++i) {
                     munmap(buffer[i], max_buffer_size);
@@ -496,7 +500,7 @@ namespace hpws {
                 // NB: execution to here can only happen in parent process
                 // clean up any mess after error
                 if (pid > 0) {
-                    kill(pid, SIGKILL); /* RH TODO change this to SIGTERM and set a timeout? */
+                    kill((pid_t)pid, SIGKILL); /* RH TODO change this to SIGTERM and set a timeout? */
                     int status;
                     waitpid(pid, &status, 0 /* should we use WNOHANG? */);
                 }
@@ -515,16 +519,16 @@ namespace hpws {
     class server {
 
     private:
-        int server_pid_;
+        pid_t server_pid_;
         int master_control_fd_;
         uint32_t max_buffer_size_;
 
         //  private constructor
-        server ( int server_pid, int master_control_fd, uint32_t max_buffer_size )
+        server ( pid_t server_pid, int master_control_fd, uint32_t max_buffer_size )
         : server_pid_(server_pid), master_control_fd_(master_control_fd), max_buffer_size_(max_buffer_size) {}
     public:
 
-        int server_pid() {
+        pid_t server_pid() {
             return server_pid_;
         }
 
@@ -589,7 +593,8 @@ namespace hpws {
                 return error{202, "timeout waiting for hpws accept child message"};
 
             // first thing we'll receive is the pid of the client
-            pid_t pid = 0;
+            // must not use pid_t here since we transfer across IPC channel as a uint32.
+            uint32_t pid = 0;
             if (recv(child_fd, (unsigned char*)(&pid), sizeof(pid), 0) < sizeof(pid))
                 HPWS_ACCEPT_ERROR(212, "did not receive expected 4 byte pid of child process on accept");
 
@@ -653,7 +658,7 @@ namespace hpws {
                 buf,
                 child_fd,
                 max_buffer_size_,
-                pid,
+                (pid_t)pid,
                 buffer_fd,
                 mapping
             };
@@ -680,7 +685,7 @@ namespace hpws {
             int error_code = -1;
             const char* error_msg = NULL;
             int fd[2] = {-1, -1};
-            int pid = -1;
+            pid_t pid = -1;
             int count_args = 17 + argv.size();
             char const ** argv_pass = NULL;
 
