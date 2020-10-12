@@ -5,6 +5,7 @@
 #include <sys/types.h>
 #include <variant>
 #include <optional>
+#include <functional>
 #include <alloca.h>
 #include <sys/types.h>
 #include <sys/socket.h>
@@ -331,7 +332,8 @@ namespace hpws {
             std::string_view host,
             uint16_t port,
             std::string_view get,
-            std::vector<std::string_view> argv  )
+            std::vector<std::string_view> argv,
+            std::function<void()> fork_child_init = NULL)
         {
 
             #define HPWS_CONNECT_ERROR(code, msg)\
@@ -480,6 +482,8 @@ namespace hpws {
             } else {
 
                 // --- CHILD
+                if (fork_child_init)
+                    fork_child_init();
 
                 close(fd[0]);
 
@@ -704,7 +708,8 @@ namespace hpws {
             uint16_t max_con_per_ip,
             std::string_view cert_path,
             std::string_view key_path,
-            std::vector<std::string_view> argv //additional_arguments
+            std::vector<std::string_view> argv, //additional_arguments
+            std::function<void()> fork_child_init = NULL
         ){
             #define HPWS_SERVER_ERROR(code, msg)\
             {\
@@ -812,6 +817,8 @@ namespace hpws {
             } else {
 
                 // --- CHILD
+                if (fork_child_init)
+                    fork_child_init();
 
                 close(fd[0]);
 
