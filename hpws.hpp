@@ -522,11 +522,22 @@ namespace hpws {
         pid_t server_pid_;
         int master_control_fd_;
         uint32_t max_buffer_size_;
+        bool moved = false;
 
         //  private constructor
         server ( pid_t server_pid, int master_control_fd, uint32_t max_buffer_size )
         : server_pid_(server_pid), master_control_fd_(master_control_fd), max_buffer_size_(max_buffer_size) {}
     public:
+        // No copy constructor
+        server(const server &) = delete;
+
+        // only a move constructor
+        server(server &&old) : server_pid_(old.server_pid_),
+                               master_control_fd_(old.master_control_fd_),
+                               max_buffer_size_(old.max_buffer_size_)
+        {
+            old.moved = true;
+        }
 
         pid_t server_pid() {
             return server_pid_;
@@ -663,6 +674,23 @@ namespace hpws {
                 mapping
             };
 
+        }
+
+        ~server()
+        {
+            if (!moved)
+            {
+
+                // RH TODO ensure this pid terminates by following up with a SIGKILL
+                if (server_pid_ > 0)
+                {
+                    kill(server_pid_, SIGTERM);
+                    int status;
+                    waitpid(server_pid_, &status, 0 /* should we use WNOHANG? */);
+                }
+
+                close(master_control_fd_);
+            }
         }
 
         static std::variant<server, error> create(
