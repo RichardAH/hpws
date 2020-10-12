@@ -2,7 +2,7 @@
 #define HPWS_INCLUDE
 #include <signal.h>
 #include <poll.h>
-
+#include <sys/types.h>
 #include <variant>
 #include <optional>
 #include <alloca.h>
@@ -17,6 +17,7 @@
 #include <string.h>
 #include <fcntl.h>
 #include <sys/wait.h>
+#include <netdb.h>
 
 #define DECODE_O_SIZE(control_msg, into)\
 {\
@@ -60,7 +61,7 @@ namespace hpws {
     class client {
 
     private:
-        uint32_t child_pid = 0;  // if this client was created by a connect this is set
+        pid_t child_pid = 0;  // if this client was created by a connect this is set
         // this value can't be changed once it's established between the processes
         uint32_t max_buffer_size;
         bool moved = false;
@@ -85,7 +86,7 @@ namespace hpws {
             addr_t endpoint,
             int control_line_fd,
             uint32_t max_buffer_size,
-            int child_pid,
+            pid_t child_pid,
             int buffer_fd[4],
             void* buffer[4]) :
             endpoint(endpoint),
@@ -136,8 +137,12 @@ namespace hpws {
             if (!moved) {
 
                 // RH TODO ensure this pid terminates by following up with a SIGKILL
-                if (child_pid > -1)
+                if (child_pid > 0)
+                {
                     kill(child_pid, SIGTERM);
+                    int status;
+                    waitpid(child_pid, &status, 0 /* should we use WNOHANG? */);
+                }
 
                 for (int i = 0; i < 4; ++i) {
                     munmap(buffer[i], max_buffer_size);
@@ -146,6 +151,16 @@ namespace hpws {
 
                 close(control_line_fd);
             }
+        }
+
+        const std::variant<std::string, error> host_address()
+        {
+            char hostname[NI_MAXHOST];
+            const int ret = getnameinfo((sockaddr *)&endpoint, sizeof(sockaddr), hostname, sizeof(hostname), NULL, 0, NI_NUMERICHOST);
+            if (ret != 0)
+                return error { 10,  gai_strerror(ret) };
+ 
+            return hostname;
         }
 
         std::variant<std::string_view, error> read()
@@ -197,7 +212,7 @@ namespace hpws {
                     DECODE_O_SIZE(buf, len);
 
                     if (HPWS_DEBUG)
-                        fprintf(stderr, "[HPWS.HPP] o message len: %lu\n", len);
+                        fprintf(stderr, "[HPWS.HPP] o message len: %u\n", len);
 
                     int bufno = buf[1] - '0';
                     if (bufno != 0 && bufno != 1)
@@ -291,7 +306,7 @@ namespace hpws {
 
             // send the control message informing hpws that a message is ready on this buffer
             uint32_t len = to_write.size();
-            char buf[6] = { 'o', '0' + (bufno-2), 0, 0, 0 ,0 };
+            char buf[6] = { 'o', (char)('0' + (bufno-2)), 0, 0, 0 ,0 };
             ENCODE_O_SIZE(buf, len);
 
             if (::write(control_line_fd, buf, 6) != 6)
@@ -488,7 +503,7 @@ namespace hpws {
                 // NB: execution to here can only happen in parent process
                 // clean up any mess after error
                 if (pid > 0) {
-                    kill(pid, SIGKILL); /* RH TODO change this to SIGTERM and set a timeout? */
+                    kill((pid_t)pid, SIGKILL); /* RH TODO change this to SIGTERM and set a timeout? */
                     int status;
                     waitpid(pid, &status, 0 /* should we use WNOHANG? */);
                 }
@@ -507,16 +522,27 @@ namespace hpws {
     class server {
 
     private:
-        int server_pid_;
+        pid_t server_pid_;
         int master_control_fd_;
         uint32_t max_buffer_size_;
+        bool moved = false;
 
         //  private constructor
-        server ( int server_pid, int master_control_fd, uint32_t max_buffer_size )
+        server ( pid_t server_pid, int master_control_fd, uint32_t max_buffer_size )
         : server_pid_(server_pid), master_control_fd_(master_control_fd), max_buffer_size_(max_buffer_size) {}
     public:
+        // No copy constructor
+        server(const server &) = delete;
 
-        int server_pid() {
+        // only a move constructor
+        server(server &&old) : server_pid_(old.server_pid_),
+                               master_control_fd_(old.master_control_fd_),
+                               max_buffer_size_(old.max_buffer_size_)
+        {
+            old.moved = true;
+        }
+
+        pid_t server_pid() {
             return server_pid_;
         }
 
@@ -529,7 +555,7 @@ namespace hpws {
         }
 
 
-        std::variant<client, error> accept()
+        std::variant<client, error> accept(const bool no_block = false)
         {
             #define HPWS_ACCEPT_ERROR(code, msg)\
                 { return error {code, msg}; }
@@ -541,6 +567,22 @@ namespace hpws {
                 char cmsgbuf[CMSG_SPACE(sizeof(int))];
                 child_msg.msg_control = cmsgbuf;
                 child_msg.msg_controllen = sizeof(cmsgbuf);
+
+                // If no-block is specified, we first check any bytes available on control fd
+                // before attempting to do a blocking a read.
+                if (no_block)
+                {
+                    struct pollfd master_pfd;
+                    master_pfd.fd = this->master_control_fd_;
+                    master_pfd.events = POLLIN;
+                    const int master_poll_result = poll(&master_pfd, 1, HPWS_SMALL_TIMEOUT);
+                    
+                    if (master_poll_result == -1) // 1 ms timeout
+                        HPWS_ACCEPT_ERROR(200, "poll failed on master control line");
+                    
+                    if (master_poll_result == 0) // No data available
+                        HPWS_ACCEPT_ERROR(199, "no new client available");
+                }
 
                 int bytes_read =
                     recvmsg(this->master_control_fd_, &child_msg, 0);
@@ -565,6 +607,7 @@ namespace hpws {
                 return error{202, "timeout waiting for hpws accept child message"};
 
             // first thing we'll receive is the pid of the client
+            // must not use pid_t here since we transfer across IPC channel as a uint32.
             uint32_t pid = 0;
             if (recv(child_fd, (unsigned char*)(&pid), sizeof(pid), 0) < sizeof(pid))
                 HPWS_ACCEPT_ERROR(212, "did not receive expected 4 byte pid of child process on accept");
@@ -629,11 +672,28 @@ namespace hpws {
                 buf,
                 child_fd,
                 max_buffer_size_,
-                pid,
+                (pid_t)pid,
                 buffer_fd,
                 mapping
             };
 
+        }
+
+        ~server()
+        {
+            if (!moved)
+            {
+
+                // RH TODO ensure this pid terminates by following up with a SIGKILL
+                if (server_pid_ > 0)
+                {
+                    kill(server_pid_, SIGTERM);
+                    int status;
+                    waitpid(server_pid_, &status, 0 /* should we use WNOHANG? */);
+                }
+
+                close(master_control_fd_);
+            }
         }
 
         static std::variant<server, error> create(
@@ -656,7 +716,7 @@ namespace hpws {
             int error_code = -1;
             const char* error_msg = NULL;
             int fd[2] = {-1, -1};
-            int pid = -1;
+            pid_t pid = -1;
             int count_args = 17 + argv.size();
             char const ** argv_pass = NULL;
 
