@@ -307,6 +307,10 @@ namespace hpws
 
             // execution to here ensures at least one buffer is free
             int bufno = (buffer_lock[0] == 0 ? 2 : 3);
+
+            // update the selected buffer lock
+            buffer_lock[bufno - 2] = 1;
+
             // write into the buffer
             memcpy(buffer[bufno], to_write.data(), to_write.size());
 
