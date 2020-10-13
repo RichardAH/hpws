@@ -37,18 +37,19 @@ int main(int argc, char** argv) {
     signal (SIGCHLD, proc_exit);
 
     if (argc > 1 && argv[1][0] == 'c')
-        example_client();
+        return example_client();
     else
-        example_server();
+        return example_server();
 }
 
 int example_client() {
-    auto accept_result = hpws::client::connect ( "hpws", 16*1024*1024, "test.evernode.org", 443, "/", {} );
+    auto accept_result = hpws::client::connect ( "hpws", 16*1024*1024, "localhost", 8080, "/", {} );
     
     if (std::holds_alternative<hpws::client>(accept_result)) {
         printf("[TEST.CPP] a client connected\n");
     } else {
         PRINT_HPWS_ERROR(accept_result);
+        return 1;
     }
 
     auto client = std::move(std::get<hpws::client>(accept_result));
@@ -87,7 +88,7 @@ int example_client() {
 
 
 int example_server() {
-    auto server = hpws::server::create ( "hpws", 16*1024*1024, 443, 512, 2, "cert.pem", "key.pem", {} );
+    auto server = hpws::server::create ( "hpws", 16*1024*1024, 8080, 512, 2, "cert.pem", "key.pem", {} );
 
     if ( std::holds_alternative<hpws::server>(server) ) {
         fprintf(stderr, "[TEST.CPP] we got a server\n");
@@ -99,6 +100,7 @@ int example_server() {
             fprintf(stderr, "[TEST.CPP] a client connected\n");
         } else {
             PRINT_HPWS_ERROR(accept_result);
+            return 1;
         }
 
         auto client = std::get<hpws::client>(std::move(accept_result));
