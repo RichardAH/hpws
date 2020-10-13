@@ -194,8 +194,11 @@ namespace hpws
                 bytes_read = recv(control_line_fd, buf, sizeof(buf), 0);
                 if (bytes_read < 1)
                 {
-                    perror("recv");
-                    fprintf(stderr, "[HPWS.HPP] bytes received %d\n", bytes_read);
+                    if (HPWS_DEBUG)
+                    {
+                        perror("recv");
+                        fprintf(stderr, "[HPWS.HPP] bytes received %d\n", bytes_read);
+                    }
                     return error{1, "[read] control line could not be read"}; // todo clean up somehow?
                 }
             }
