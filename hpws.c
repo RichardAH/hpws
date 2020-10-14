@@ -50,6 +50,7 @@
 #include <getopt.h>
 #include <sys/types.h>
 #include <netdb.h>
+#include <sys/ioctl.h>
 
 /*
 ** --------------------------------------------------------------------------------------------------------------------
@@ -636,6 +637,12 @@ int main(int argc, char **argv)
             if (bytes_read < 1)
                 GOTO_ERROR("received invalid control message or control fd has broken or closed",
                            control_closed);
+            if (DEBUG)
+            {
+                int n = 0;
+                int err = ioctl(control_fd, FIONREAD, &n);
+                fprintf(stderr, "[HPWS.C] Incoming message and still to read on controlfd: %d (ioctl=%d)\n", n, err);
+            }
 
             switch (*control_msg)
             {
@@ -749,14 +756,16 @@ int main(int argc, char **argv)
         {
             bytes_written = write(client_fd, ssl_write_buf, ssl_write_len);
             if (DEBUG)
-                fprintf(stderr, "[HPWS.C] outgoing data %ld\n", bytes_written);
+                fprintf(stderr, "[HPWS.C] RAW outgoing data %ld\n", bytes_written);
             if (bytes_written <= 0)
                 GOTO_ERROR("unable to write encrypted bytes to socket", ssl_error); 
             if (bytes_written < ssl_write_len)
                 memmove(ssl_write_buf, ssl_write_buf + bytes_written, ssl_write_len - bytes_written);
             ssl_write_len -= bytes_written;
             ssl_write_buf = (char*)realloc(ssl_write_buf, ssl_write_len);
-            continue;
+            if (DEBUG)
+                fprintf(stderr, "[HPWS.C] RAW bytes remaining to write: %d\n", ssl_write_len); 
+        //    continue;
         }
         
         // ------------------------------------------------------------------------------------------------------------
