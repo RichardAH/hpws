@@ -15,7 +15,8 @@
     -------------------
     1.  A hotpocket (HP) instance requires to either connect out or allow others to connect in over tls websocket.
     2.  HP fork-execs HPWS with the appropriate command line options for the desired activity.
-    3.  A control line (anonymous unix domain socket) is used to communicate control message between HPWS and HP.
+    3.  Two control lines (anonymous unix domain socket) are used to communicate control message between HPWS and HP.
+    3.  Control line 0 is HPWS->HPCORE (with acks in the other direction) and CL1 is visa versa.
     4.  HPWS forks for each incoming client (in server mode) or connects out directly (client mode).
     5.  Each time a new connection is established HPWS calls memfd_create to create anonymous buffers for sharing 
         incoming and outgoing data for that connection between HPWS and HP.
@@ -108,7 +109,9 @@ int main(int argc, char **argv)
         struct sockaddr_storage ss;
     } client_addr;
     size_t client_addr_len = sizeof(client_addr); memset(&client_addr, 0, client_addr_len);
-    int client_fd = -1, control_fd = -1, port = 443, max_con = 512, max_con_ip = 5, is_server = 1, is_ipv6 = 0;
+    int client_fd = -1, control_fd[2] = {-1,-2}, master_control_fd = -1, port = 443, max_con = 512;
+    int arg_control_fd_2 = -1; // this is passed in connect mode at the commandline and becomes control_fd[1]
+    int  max_con_ip = 5, is_server = 1, is_ipv6 = 0;
     int urand_fd = -1;
     char ip[40]; ip[0] = '\0';
     char host[256]; host[0] = '\0';             // this is the host as parsed from the cmdline when in client mode
@@ -132,7 +135,7 @@ int main(int argc, char **argv)
     char* ws_buf_decode = NULL; 
 
     // event loop variables
-    struct pollfd fdset[2];
+    struct pollfd fdset[3];
     memset(&fdset, 0, sizeof(fdset));
 
 /*
@@ -164,6 +167,7 @@ int main(int argc, char **argv)
             {"host",        required_argument,  0,      1 },
             {"ipv6",        no_argument,        0,      1 },
             {"get",         required_argument,  0,      1 },
+            {"cntlfd2",     required_argument,  0,      1 },
             {0,             0,                  0,      0 }
         };
 
@@ -191,7 +195,7 @@ int main(int argc, char **argv)
                     strncpy(key, optarg, sizeof(key));
                     continue;
                 case 6:
-                    PARSE_INT_OR_EXIT(optarg, "cntlfd", control_fd);
+                    PARSE_INT_OR_EXIT(optarg, "cntlfd", master_control_fd);
                     continue;
                 case 7:
                     PARSE_INT_OR_EXIT(optarg, "maxcon", max_con);
@@ -207,6 +211,9 @@ int main(int argc, char **argv)
                     continue;
                 case 11:
                     strncpy(get, optarg, sizeof(get));
+                    continue;
+                case 12:
+                    PARSE_INT_OR_EXIT(optarg, "cntlfd2", arg_control_fd_2);
                     continue;
                 default:
                     continue;
@@ -227,8 +234,11 @@ int main(int argc, char **argv)
         if (!is_server && host[0] == '\0')
             ABEND(40, "must specify --host when invoking as a --client");
         
-        if (control_fd < 0)
+        if (master_control_fd < 0)
             ABEND(50, "must supply a control FD --cntlfd <fd> as one side of a SOCK_SEQPACKET opened with socketpair");
+    
+        if (!is_server && arg_control_fd_2 == -1)
+            ABEND(41, "must specify --cntlfd2 <fd> when using connect mode, this is the hpcore->hpws line");
     }
 /*
 ** --------------------------------------------------------------------------------------------------------------------
@@ -238,7 +248,6 @@ int main(int argc, char **argv)
     if (is_server)
     {
         // RH todo: provide a way for listen loop (server) process to gracefully close and clean up fds
-        int master_control_fd = control_fd; // control_fd will become client's fd every loop so make a note of original
     
         char startup_msg[] = "startup";
         if (send(master_control_fd, startup_msg, sizeof(startup_msg)-1, 0) != sizeof(startup_msg)-1)
@@ -295,8 +304,10 @@ int main(int argc, char **argv)
             // control fd for the child we about to fork(). once we have the pair we send
             // one end to the child and one end down the master_control_fd
             // then the server closes all ends it owns
-            int child_control_fd[2];
-            if (socketpair(AF_UNIX, SOCK_SEQPACKET, 0, child_control_fd)) {
+            int child_control_fd[4];
+            if (socketpair(AF_UNIX, SOCK_SEQPACKET, 0, child_control_fd) ||
+                socketpair(AF_UNIX, SOCK_SEQPACKET, 0, child_control_fd + 2))
+            {
                 //RH TODO should we kill off the proc here?
                 fprintf(stderr, "failed to create socketpair for new accept, closing connection\n");
                 close(client_fd);
@@ -307,7 +318,7 @@ int main(int argc, char **argv)
             {
                 struct msghdr msg = { 0 };
                 struct cmsghdr *cmsg;
-                int send_fd[1] = {child_control_fd[1]} ;  /* Contains the file descriptors to pass */
+                int send_fd[2] = {child_control_fd[1], child_control_fd[3]} ;  /* Contains the file descriptors to pass */
                 char iobuf[1];
                 struct iovec io = {
                     .iov_base = iobuf,
@@ -326,36 +337,39 @@ int main(int argc, char **argv)
                 cmsg = CMSG_FIRSTHDR(&msg);
                 cmsg->cmsg_level = SOL_SOCKET;
                 cmsg->cmsg_type = SCM_RIGHTS;
-                cmsg->cmsg_len = CMSG_LEN(sizeof(int));
-                memcpy(CMSG_DATA(cmsg), send_fd,  sizeof(int));
+                cmsg->cmsg_len = CMSG_LEN(sizeof(int)*2);
+                memcpy(CMSG_DATA(cmsg), send_fd,  sizeof(int)*2);
 
                 if (sendmsg(master_control_fd, &msg, 0) < 0)
                 {
                     fprintf(stderr,
                         "could not send control line fd for newly connected client down master control line");
                     close(client_fd);
-                    close(child_control_fd[0]);
-                    close(child_control_fd[1]);
+                    for (int i = 0; i < 4; ++i)
+                        close(child_control_fd[i]);
+                    
                     continue;
                 }    
             }
 
             // todo: count clients / sub processes
             if (fork()) {
-                close(child_control_fd[0]);
-                close(child_control_fd[1]);
+                for (int i = 0; i < 4; ++i)
+                    close(child_control_fd[i]);
                 close(client_fd);
                 continue;
             }
             
             // fall through to this point in code indicates this is a child process
             close(child_control_fd[1]);
-            control_fd = child_control_fd[0];
+            close(child_control_fd[3]);
+            control_fd[0] = child_control_fd[0];
+            control_fd[1] = child_control_fd[2];
             close(listen_sock);
 
             // send pid down the line as a four byte integer
             uint32_t to_send = (uint32_t)getpid();
-            if (send(control_fd, (unsigned char*)(&to_send), sizeof(uint32_t), 0) < sizeof(uint32_t))
+            if (send(control_fd[0], (unsigned char*)(&to_send), sizeof(uint32_t), 0) < sizeof(uint32_t))
                 ABEND(80, "could not send pid down control line");
 
             break;
@@ -368,6 +382,12 @@ int main(int argc, char **argv)
 */
     if (!is_server)
     {
+        control_fd[0] = master_control_fd;
+        control_fd[1] = arg_control_fd_2;
+    
+        if (DEBUG)
+            fprintf(stderr, "[HPWS.C] client mode control_fd hpws->hpcore is %d contol_fd hpcore->hpws is %d\n",
+                    control_fd[0], control_fd[1]);
 
         // as a websocket client we are required to generate masking keys
         // so open this fd to urandom and leave it open
@@ -426,9 +446,9 @@ int main(int argc, char **argv)
         // 3. the buffer being written to will only be handed to the other process
         //    when the buffer being read from is handed back 
         //    this is so there is always a buffer to write into
-        ws_buffer_fd[0] = memfd_create("hpws_to_core_1", 0);
+        ws_buffer_fd[0] = memfd_create("hpws_to_core_1", 0);  // messages for these are on control_fd[0]
         ws_buffer_fd[1] = memfd_create("hpws_to_core_2", 0);
-        ws_buffer_fd[2] = memfd_create("core_to_hpws_1", 0);
+        ws_buffer_fd[2] = memfd_create("core_to_hpws_1", 0);  // messages for these are on control_fd[1]
         ws_buffer_fd[3] = memfd_create("core_to_hpws_2", 0);
 
         // these record which buffers are awaiting an ack
@@ -468,7 +488,7 @@ int main(int argc, char **argv)
         // the control_fd messages are the same, the buffers are the same and the proxy is the same
 
         // first thing the new client always does is send its address to the control line
-        if (send(control_fd, (void*)&client_addr, sizeof(client_addr), 0) != sizeof(client_addr))
+        if (send(control_fd[0], (void*)&client_addr, sizeof(client_addr), 0) != sizeof(client_addr))
             ABEND(100, "could not send client_addr to control fd");
 
         if (DEBUG)
@@ -499,7 +519,7 @@ int main(int argc, char **argv)
         cmsg->cmsg_len = CMSG_LEN(sizeof(int) * 4);
         memcpy(CMSG_DATA(cmsg), ws_buffer_fd, 4 * sizeof(int));
 
-        if (sendmsg(control_fd, &msg, 0) < 0)
+        if (sendmsg(control_fd[0], &msg, 0) < 0)
             ABEND(102, "could not send buffer fds down control line");
     }
 
@@ -593,12 +613,14 @@ int main(int argc, char **argv)
 
 
     fdset[0].fd = client_fd;
-    fdset[1].fd = control_fd;
+    fdset[1].fd = control_fd[0]; // messages regarding hpws->hpcore buffers [0,1]
+    fdset[2].fd = control_fd[1]; // messages regarding hpcore->hpws buffers [2,3]
 
     for (;;)
     {
         fdset[0].events &= ~POLLOUT;
         fdset[1].events = POLLIN;
+        fdset[2].events = POLLIN;
 
         if (ssl_write_len > 0)
             fdset[0].events |=  POLLOUT;
@@ -606,7 +628,7 @@ int main(int argc, char **argv)
         if (DEBUG)
             fprintf(stderr, "[HPWS.C] polling\n");     
 
-        if (!poll(&fdset[0], 2, -1))
+        if (!poll(&fdset[0], 3, -1))
             continue;
 
         if (DEBUG)
@@ -622,33 +644,46 @@ int main(int argc, char **argv)
             GOTO_ERROR("websocket err hup nval", client_closed);   
         }
 
-        // check for errors in the control line
-        int dummy_buf[1];
-        if (fdset[1].revents & (POLLERR | POLLHUP | POLLNVAL) || read(control_fd, dummy_buf, 0))
-                GOTO_ERROR("control fd err hup nval", control_closed);   
-
         // ------------------------------------------------------------------------------------------------------------
         // incoming  message on the control line
         // ------------------------------------------------------------------------------------------------------------
-        if ( fdset[1].revents & POLLIN )
+        
+        // check for errors in the control line
+        int dummy_buf[1];
+        if (fdset[1].revents & (POLLERR | POLLHUP | POLLNVAL) || read(control_fd[0], dummy_buf, 0))
+                GOTO_ERROR("control fd err hup nval", control_closed);   
+        
+        if (fdset[2].revents & (POLLERR | POLLHUP | POLLNVAL) || read(control_fd[1], dummy_buf, 0))
+                GOTO_ERROR("control fd err hup nval", control_closed);   
+
+        for (int cl = 0; cl <= 1; ++cl)
+        if ( fdset[cl+1].revents & POLLIN )
         {
+            if (DEBUG)
+                fprintf(stderr, "[HPWS.C] processing revents for control_fd[%d]=%d\n", cl, control_fd[cl]);
             unsigned char control_msg[12];
-            int bytes_read = recv(control_fd, control_msg, sizeof(control_msg), 0);
+            int bytes_read = recv(control_fd[cl], control_msg, sizeof(control_msg), 0);
             if (bytes_read < 1)
                 GOTO_ERROR("received invalid control message or control fd has broken or closed",
                            control_closed);
+
+            if (DEBUG)
+                fprintf(stderr, "[HPWS.C] control message received on control_fd[%d]=%d: `%.*s`\n",
+                        cl, control_fd[cl], bytes_read, control_msg);
+ 
             if (DEBUG)
             {
                 int n = 0;
-                int err = ioctl(control_fd, FIONREAD, &n);
-                fprintf(stderr, "[HPWS.C] Incoming message and still to read on controlfd: %d (ioctl=%d)\n", n, err);
+                int err = ioctl(control_fd[cl], FIONREAD, &n);
+                fprintf(stderr, "[HPWS.C] Incoming message and still to read on controlfd[%d]=%d: %d (ioctl=%d)\n",cl, control_fd[cl], n, err);
             }
 
             switch (*control_msg)
             {
                 case 'c': // close
                     GOTO_ERROR("control ordered close", force_closed);
-                    break;
+                    continue;
+                    //break;
 
                 case 'a': // ack, we can unlock the specified buffer
                     {
@@ -663,7 +698,8 @@ int main(int argc, char **argv)
                         if (ws_buf_decode == NULL)
                             ws_buf_decode =  ws_buffer[unlock]; 
                     }
-                    break;
+                    continue;
+                    //break;
                 
                 // ----------------------------------------------------------------------------------------------------
                 // incoming control fd message -> outgoing websocket message
@@ -735,11 +771,12 @@ int main(int argc, char **argv)
                         SSL_FLUSH_OUT();
                         buf[0] = 'a';
                         buf[1] = '0' + lock - 2;
-                        if (send(control_fd, buf, 2, 0) != 2)
+                        if (send(control_fd[1], buf, 2, 0) != 2) // ack is always sent to control line 1
                             GOTO_ERROR("could not send ack to control fd", control_error);
 
                     }
-                    break;
+                    continue;
+                    //break;
                 }
                 default:
                     fprintf(stderr, "[HPWS.C] unknown control message received `%*.s`\n",
@@ -765,7 +802,6 @@ int main(int argc, char **argv)
             ssl_write_buf = (char*)realloc(ssl_write_buf, ssl_write_len);
             if (DEBUG)
                 fprintf(stderr, "[HPWS.C] RAW bytes remaining to write: %d\n", ssl_write_len); 
-        //    continue;
         }
         
         // ------------------------------------------------------------------------------------------------------------
@@ -922,9 +958,17 @@ int main(int argc, char **argv)
                         if (DEBUG)
                             fprintf(stderr, "[HPWS.C] sending ready from ws_state -1 (client mode)\n");
 
-                        char buf[1] = { 'r' }; // send 'ready' message
-                        if (send(control_fd, buf, 1, 0) != 1)
-                            GOTO_ERROR("could not write ready message to control fd", control_error);
+                        if (DEBUG)
+                            fprintf(stderr, "[HPWS.C] writing 'r' message to control_fd[0]=%d\n", control_fd[0]);
+                        char buf[2] = { 'r', '0' }; // send 'ready' message
+                        if (send(control_fd[0], buf, 2, 0) != 2)
+                            GOTO_ERROR("could not write ready message to control_fd[0]", control_error);
+                        
+                        if (DEBUG)
+                            fprintf(stderr, "[HPWS.C] writing 'r' message to control_fd[1]=%d\n", control_fd[1]);
+                        buf[1] = '1';
+                        if (send(control_fd[1], buf, 2, 0) != 2)
+                            GOTO_ERROR("could not write ready message to control_fd[1]", control_error);
 
                         ws_state = 1;
                         goto skip_ws;
@@ -993,11 +1037,19 @@ int main(int argc, char **argv)
                         SSL_ENQUEUE(ws_buf_decode, bytes_to_write);
                         SSL_FLUSH_OUT()
 
+            
+
                         if (DEBUG)
-                            fprintf(stderr, "[HPWS.C] sending ready from ws_state 0 (server mode)\n");
-                        char buf[1] = { 'r' }; // send 'ready' message
-                        if (send(control_fd, buf, 1, 0) != 1)
-                            GOTO_ERROR("could not write ready message to control fd", control_error);
+                            fprintf(stderr, "[HPWS.C] sending ready from ws_state 0 (server mode), "
+                                            "control_fd[0]=%d, control_fd[1]=%d\n", control_fd[0], control_fd[1]);
+                        char buf[2] = { 'r', '0' }; // send 'ready' message
+
+                        if (send(control_fd[0], buf, 2, 0) != 2)
+                            GOTO_ERROR("could not write ready message to control_fd[0]", control_error);
+                        buf[1] = '1';
+
+                        if (send(control_fd[1], buf, 2, 0) != 2)
+                            GOTO_ERROR("could not write ready message to control_fd[1]", control_error);
 
                         ws_state = 1;
                         goto skip_ws;
@@ -1088,7 +1140,7 @@ int main(int argc, char **argv)
                                     WS_SEND_CLOSE_FRAME(1000, "Bye!");
                                     // send a 'c' message to the control line
                                     char buf[1] = {'c'};
-                                    send(control_fd, buf, 1, 0); // don't care if it doesnt receive it
+                                    send(control_fd[0], buf, 1, 0); // don't care if it doesnt receive it
                                     goto ws_graceful_close;
                                     //GOTO_ERROR("ws closing due to close frame", ws_graceful_close);
                                 }
@@ -1303,7 +1355,7 @@ int main(int argc, char **argv)
                             if (DEBUG)
                                 fprintf(stderr, "[HPWS.C] sending o msg len: %d\n", ws_payload_next);
 
-                            send(control_fd, control_msg, 6, 0);
+                            send(control_fd[0], control_msg, 6, 0);
                             // do the buffer swap
                             ws_buffer_lock[sending_buf] = 1;
                             int next_buf = ( sending_buf + 1 ) % 2; // this can be extended to more than 2 buffers
@@ -1392,7 +1444,8 @@ int main(int argc, char **argv)
         fprintf(stderr, "[HPWS.C] client finished %d\n", getpid());
 
     close(client_fd);
-    close(control_fd);
+    close(control_fd[0]);
+    close(control_fd[1]);
     for (int i = 0; i < 4; ++i)
         if (ws_buffer_fd[i] > -1)
             close(ws_buffer_fd[i]);
