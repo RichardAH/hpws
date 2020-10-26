@@ -892,6 +892,7 @@ int main(int argc, char **argv)
                 #define WS_PROTOCOL_ERROR( msg )\
                 {\
                     WS_SEND_CLOSE_FRAME( 1002, msg );\
+                    fprintf(stderr, "[HPWS.C] WS_PROTOCOL_ERROR `%s`\n", msg);\
                     GOTO_ERROR("ws protocol error", ws_protocol_error);\
                 }
 
