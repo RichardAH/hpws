@@ -69,7 +69,7 @@ namespace hpws
         uint32_t max_buffer_size;
         bool moved = false;
         addr_t endpoint;
-        std::string get; // the get req this websocket was opened with
+        std::string get;             // the get req this websocket was opened with
         int control_line_fd[2];      // see below in client constructor
         int buffer_fd[4];            // 0 1 - in buffers, 2 3 - out buffers
         int buffer_lock[2] = {0, 0}; // this records if buffers 2 and 3 have been sent out awaiting an ack or not
@@ -88,7 +88,7 @@ namespace hpws
                                max_buffer_size(max_buffer_size),
                                child_pid(child_pid), get(get)
         {
-            control_line_fd[0] =control_line_fd_0;
+            control_line_fd[0] = control_line_fd_0;
             control_line_fd[1] = control_line_fd_1;
             for (int i = 0; i < 4; ++i)
             {
@@ -111,7 +111,7 @@ namespace hpws
                                get(old.get)
         {
             old.moved = true;
-            for (int i = 0; i <=1; ++i)
+            for (int i = 0; i <= 1; ++i)
             {
                 this->control_line_fd[i] = old.control_line_fd[i];
                 buffer_lock[i] = old.buffer_lock[i];
@@ -174,50 +174,50 @@ namespace hpws
 
             switch (buf[0])
             {
-                case 'o':
+            case 'o':
+            {
+                if (HPWS_DEBUG)
+                    fprintf(stderr, "[HPWS.HPP] o message received\n");
+
+                if (bytes_read != 6)
+                    return error{3, "invalid buffer in 'o' command sent by hpws"};
+
+                uint32_t len = 0;
+                DECODE_O_SIZE(buf, len);
+
+                if (HPWS_DEBUG)
+                    fprintf(stderr, "[HPWS.HPP] o message len: %u\n", len);
+
+                int bufno = buf[1] - '0';
+                if (bufno != 0 && bufno != 1)
+                    return error{3, "invalid buffer in 'o' command sent by hpws"};
+
+                if (HPWS_DEBUG)
                 {
-                    if (HPWS_DEBUG)
-                        fprintf(stderr, "[HPWS.HPP] o message received\n");
-
-                    if (bytes_read != 6)
-                        return error{3, "invalid buffer in 'o' command sent by hpws"};
-                    
-                    uint32_t len = 0;
-                    DECODE_O_SIZE(buf, len);
-
-                    if (HPWS_DEBUG)
-                        fprintf(stderr, "[HPWS.HPP] o message len: %u\n", len);
-
-                    int bufno = buf[1] - '0';
-                    if (bufno != 0 && bufno != 1)
-                        return error{3, "invalid buffer in 'o' command sent by hpws"};
-
-                    if (HPWS_DEBUG)
-                    {
-                        fprintf(stderr, "[HPWS.HPP] read %d\n", len);
-                        for (uint32_t i = 0; i < len; ++i)
-                            putc(((char *)(buffer[bufno]))[i], stderr);
-                        fprintf(stderr, "\n---\n");
-                    }
-                    return std::string_view{(const char *)(buffer[bufno]), len};
+                    fprintf(stderr, "[HPWS.HPP] read %d\n", len);
+                    for (uint32_t i = 0; i < len; ++i)
+                        putc(((char *)(buffer[bufno]))[i], stderr);
+                    fprintf(stderr, "\n---\n");
                 }
-                case 'c':
-                {
-                    return error{1000, "ws closed"};
-                }
-                default:
-                {
-                    fprintf(stderr, "[HPWS.HPP] read unknown control message 1: `%.*s`\n", bytes_read, buf);
-                    return error{2, "unknown control line command was sent by hpws"};
-                }
+                return std::string_view{(const char *)(buffer[bufno]), len};
+            }
+            case 'c':
+            {
+                return error{1000, "ws closed"};
+            }
+            default:
+            {
+                fprintf(stderr, "[HPWS.HPP] read unknown control message 1: `%.*s`\n", bytes_read, buf);
+                return error{2, "unknown control line command was sent by hpws"};
+            }
             }
         }
 
         std::optional<error> write(std::string_view to_write)
         {
             if (HPWS_DEBUG)
-                fprintf(stderr, "[HPWS.HPP] write called for message: `%.*s`\n", 
-                        to_write.size(), to_write.data());
+                fprintf(stderr, "[HPWS.HPP] write called for message: `%.*s`\n",
+                        (int)to_write.size(), to_write.data());
 
             // check if we have any free buffers
             if (buffer_lock[0] && buffer_lock[1])
@@ -238,22 +238,22 @@ namespace hpws
 
                 switch (buf[0])
                 {
-                    case 'a':
-                    {
-                        if (bytes_read != 2)
-                            return error{4, "received an ack longer than 2 bytes"};
-                        int bufno = buf[1] - '0';
-                        if (!(bufno == 0 || bufno == 1))
-                            return error{5, "received an ack with an invalid buffer, expecting 0 or 1"};
-                        // unlock the buffer
-                        buffer_lock[bufno] = 0;
-                        break;
-                    }
-                    case 'c':
-                        return error{1000, "ws closed"};
-                    default:
-                        fprintf(stderr, "[HPWS.HPP] read unknown control message 2: `%.*s`\n", bytes_read, buf);
-                        return error{2, "unknown control line command was sent by hpws"};
+                case 'a':
+                {
+                    if (bytes_read != 2)
+                        return error{4, "received an ack longer than 2 bytes"};
+                    int bufno = buf[1] - '0';
+                    if (!(bufno == 0 || bufno == 1))
+                        return error{5, "received an ack with an invalid buffer, expecting 0 or 1"};
+                    // unlock the buffer
+                    buffer_lock[bufno] = 0;
+                    break;
+                }
+                case 'c':
+                    return error{1000, "ws closed"};
+                default:
+                    fprintf(stderr, "[HPWS.HPP] read unknown control message 2: `%.*s`\n", bytes_read, buf);
+                    return error{2, "unknown control line command was sent by hpws"};
                 }
             }
 
@@ -317,8 +317,8 @@ namespace hpws
 
             if (socketpair(AF_UNIX, SOCK_SEQPACKET, 0, fd))
                 HPWS_CONNECT_ERROR(100, "could not create unix domain socket pair");
-            
-            if (socketpair(AF_UNIX, SOCK_SEQPACKET, 0, fd+2))
+
+            if (socketpair(AF_UNIX, SOCK_SEQPACKET, 0, fd + 2))
                 HPWS_CONNECT_ERROR(101, "could not create unix domain socket pair");
 
             // construct the arguments
@@ -336,7 +336,6 @@ namespace hpws
 
             snprintf(cfd1, 10, "%d", fd[1]);
             snprintf(cfd2, 10, "%d", fd[3]);
-
 
             argv_pass =
                 reinterpret_cast<char const **>(alloca(sizeof(char *) * count_args));
@@ -375,8 +374,7 @@ namespace hpws
 
                 int flags[2] = {
                     fcntl(child_fd[0], F_GETFD, NULL),
-                    fcntl(child_fd[1], F_GETFD, NULL)
-                };
+                    fcntl(child_fd[1], F_GETFD, NULL)};
 
                 if (flags[0] < 0 || flags[1] < 0)
                     HPWS_CONNECT_ERROR(101, "could not get flags from unix domain socket");
@@ -456,13 +454,12 @@ namespace hpws
 
                     if (rbuf[0] != 'r')
                         HPWS_CONNECT_ERROR(3, "unexpected content in message sent by hpws client mode on startup");
-                    
+
                     if (rbuf[1] != '0' + i)
                         HPWS_CONNECT_ERROR(4, "received wrong r message on control fd");
 
                     if (HPWS_DEBUG)
-                        fprintf(stderr, "[HPWS.HPP] received 'r%c' on child_fd[%d]=%d\n",rbuf[1], i, child_fd[i]);
-
+                        fprintf(stderr, "[HPWS.HPP] received 'r%c' on child_fd[%d]=%d\n", rbuf[1], i, child_fd[i]);
                 }
 
                 return client{
@@ -491,8 +488,8 @@ namespace hpws
                 if (dup2(fd[3], 4) == -1)
                     perror("dup2 fd[3]");
                 */
-//                close(fd[1]);
-//                close(fd[3]);
+                //                close(fd[1]);
+                //                close(fd[3]);
 
                 // we're assuming all fds above 3 will have close_exec flag
                 execv(bin_path.data(), (char *const *)argv_pass);
@@ -564,16 +561,28 @@ namespace hpws
 
         std::variant<client, error> accept(const bool no_block = false)
         {
-#define HPWS_ACCEPT_ERROR(code, msg) \
-    {                                \
-        return error{code, msg};     \
+#define HPWS_ACCEPT_ERROR(code, msg)                            \
+    {                                                           \
+        for (int i = 0; i < 4; i++)                             \
+        {                                                       \
+            if (mapping[i] != MAP_FAILED && mapping[i] != NULL) \
+                munmap(mapping[i], max_buffer_size_);           \
+            if (i < 2 && child_fd[i] > -1)                      \
+                close(child_fd[i]);                             \
+            if (buffer_fd[i] > -1)                              \
+                close(buffer_fd[i]);                            \
+        }                                                       \
+        return error{code, msg};                                \
     }
 
-            int child_fd[2] = {-1,-1};
+            int child_fd[2] = {-1, -1};
+            int buffer_fd[4] = {-1, -1, -1, -1};
+            void *mapping[4] = {NULL, NULL, NULL, NULL};
+
             {
                 struct msghdr child_msg = {0};
                 memset(&child_msg, 0, sizeof(child_msg));
-                char cmsgbuf[CMSG_SPACE(sizeof(int)*2)];
+                char cmsgbuf[CMSG_SPACE(sizeof(int) * 2)];
                 child_msg.msg_control = cmsgbuf;
                 child_msg.msg_controllen = sizeof(cmsgbuf);
 
@@ -616,7 +625,7 @@ namespace hpws
 
             // timeout or error
             if (ret < 1)
-                return error{202, "timeout waiting for hpws accept child message"};
+                HPWS_ACCEPT_ERROR(202, "timeout waiting for hpws accept child message");
 
             // first thing we'll receive is the pid of the client
             // must not use pid_t here since we transfer across IPC channel as a uint32.
@@ -630,11 +639,9 @@ namespace hpws
                 recv(child_fd[0], (unsigned char *)(&buf), sizeof(buf), 0);
 
             if (bytes_read < sizeof(buf))
-                return error{202, "received message on master control line was not sizeof(sockaddr_in6)"};
+                HPWS_ACCEPT_ERROR(202, "received message on master control line was not sizeof(sockaddr_in6)");
 
             // third thing we will receive is the four fds for the buffers
-            int buffer_fd[4] = {-1, -1, -1, -1};
-            void *mapping[4];
             {
                 struct msghdr child_msg = {0};
                 memset(&child_msg, 0, sizeof(child_msg));
@@ -646,17 +653,17 @@ namespace hpws
                     recvmsg(child_fd[0], &child_msg, 0);
                 struct cmsghdr *cmsg = CMSG_FIRSTHDR(&child_msg);
                 if (cmsg == NULL || cmsg->cmsg_type != SCM_RIGHTS)
-                    return error{203, "non-scm_rights message sent on accept child control line"};
+                    HPWS_ACCEPT_ERROR(203, "non-scm_rights message sent on accept child control line");
                 memcpy(&buffer_fd, CMSG_DATA(cmsg), sizeof(buffer_fd));
                 for (int i = 0; i < 4; ++i)
                 {
                     //fprintf(stderr, "scm passed buffer_fd[%d] = %d\n", i, buffer_fd[i]);
                     if (buffer_fd[i] < 0)
-                        return error{203, "child accept scm_rights a passed buffer fd was negative"};
+                        HPWS_ACCEPT_ERROR(203, "child accept scm_rights a passed buffer fd was negative");
                     mapping[i] =
                         mmap(0, max_buffer_size_, PROT_READ | PROT_WRITE, MAP_SHARED, buffer_fd[i], 0);
-                    if (mapping[i] == (void *)(-1))
-                        return error{204, "could not mmap scm_rights passed buffer fd"};
+                    if (mapping[i] == MAP_FAILED)
+                        HPWS_ACCEPT_ERROR(204, "could not mmap scm_rights passed buffer fd");
                 }
             }
             {
@@ -672,7 +679,6 @@ namespace hpws
                     // now we wait for a 'r' ready message or for the socket/client to die
                     ret = poll(&pfd, 1, HPWS_LONG_TIMEOUT); // default= 1500 ms timeout
 
-
                     char rbuf[2];
                     bytes_read = recv(child_fd[i], rbuf, sizeof(rbuf), 0);
                     if (bytes_read < 1)
@@ -682,15 +688,13 @@ namespace hpws
                         HPWS_ACCEPT_ERROR(3, "unexpected content in message sent by hpws client mode on startup");
 
                     if (rbuf[1] != '0' + i)
-                        HPWS_ACCEPT_ERROR(4, "received wrong r message on control line fd");                    
+                        HPWS_ACCEPT_ERROR(4, "received wrong r message on control line fd");
 
                     if (HPWS_DEBUG)
-                        fprintf(stderr, "[HPWS.HPP] 'r%c' received on child_fd[%d]=%d\n",rbuf[1], i, child_fd[i]);
+                        fprintf(stderr, "[HPWS.HPP] 'r%c' received on child_fd[%d]=%d\n", rbuf[1], i, child_fd[i]);
                 }
-
             }
 
-            // RH TODO: accept needs a proper child cleanup on failure
             return client{
                 "",
                 buf,
