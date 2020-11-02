@@ -143,6 +143,9 @@ namespace hpws
 
                 close(control_line_fd[0]);
                 close(control_line_fd[1]);
+
+                if (HPWS_DEBUG)
+                    fprintf(stderr, "[HPWS.HPP] child destructed pid = %d\n", child_pid);
             }
         }
 
@@ -311,7 +314,7 @@ namespace hpws
             const char *error_msg = NULL;
             int fd[4] = {-1, -1, -1, -1}; // 0,1 are hpws->hpcore, 2,3 are hpcore->hpws
             int buffer_fd[4] = {-1, -1, -1, -1};
-            void *mapping[4] = { NULL, NULL, NULL, NULL};
+            void *mapping[4] = {NULL, NULL, NULL, NULL};
             int pid = -1;
             int count_args = 14 + argv.size();
             char const **argv_pass = NULL;
