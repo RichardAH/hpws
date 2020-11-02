@@ -5,9 +5,9 @@
 
     Note to the reader:
     -------------------
-    The code below is designed to be a minimal dependency all-in-one communication component for hotpocket, isolating 
-    each connection and all of its state into one connection per process. The design is deliberately low level and due 
-    to the lack of co-routines in C the entire component is programmed as a single event loop using macros to 
+    The code below is designed to be a minimal dependency all-in-one communication component for hotpocket, isolating
+    each connection and all of its state into one connection per process. The design is deliberately low level and due
+    to the lack of co-routines in C the entire component is programmed as a single event loop using macros to
     manipulate stack-bound state and program flow. An attempt has been made to make it reasonably readable, however if
     you are unfamiliar with purely procedural code you might become somewhat lost.
 
@@ -18,10 +18,10 @@
     3.  Two control lines (anonymous unix domain socket) are used to communicate control message between HPWS and HP.
     3.  Control line 0 is HPWS->HPCORE (with acks in the other direction) and CL1 is visa versa.
     4.  HPWS forks for each incoming client (in server mode) or connects out directly (client mode).
-    5.  Each time a new connection is established HPWS calls memfd_create to create anonymous buffers for sharing 
+    5.  Each time a new connection is established HPWS calls memfd_create to create anonymous buffers for sharing
         incoming and outgoing data for that connection between HPWS and HP.
     6.  HPWS shares handles to these anonymous buffers over the control line (via SCM_RIGHTS).
-    7.  When data becomes available in a buffer (for a connection) a control message is sent allowing the other party 
+    7.  When data becomes available in a buffer (for a connection) a control message is sent allowing the other party
         to read or discard the message as needed.
 
 */
@@ -33,6 +33,7 @@
 */
 #define DEBUG 0
 #define SSL_BUFFER_LENGTH 4096
+#define POLL_TIMEOUT 500 /* ms */
 #define _GNU_SOURCE
 
 #include <stdio.h>
@@ -52,32 +53,45 @@
 #include <sys/types.h>
 #include <netdb.h>
 #include <sys/ioctl.h>
+#include <sys/prctl.h>
+
+pid_t parent_pid = -1; // we set this on startup
 
 /*
 ** --------------------------------------------------------------------------------------------------------------------
 **  Universal macros and prototypes
 ** --------------------------------------------------------------------------------------------------------------------
 */
-#define GOTO_ERROR(x,y) { fprintf(stderr, "[HPWS.C] GOTO %s, ERROR: %s\n", #y, (x)); goto y; }
-#define ABEND(code, str) { fprintf(stderr, "[HPWS.C] ABEND: %s\n", str); exit(code); }
-#define DECODE_O_SIZE(control_msg, into)\                                                                              
-{\                                                                                                                     
-     into =  ((uint32_t)control_msg[2] << 24) + ((uint32_t)control_msg[3] << 16) +\                                    
+#define GOTO_ERROR(x,y)\
+{\
+    fprintf(stderr, "[HPWS.C] GOTO %s, ERROR: %s\n", #y, (x));\
+    goto y;\
+}
+#define ABEND(code, str)\
+{\
+    fprintf(stderr, "[HPWS.C] ABEND: %s\n", str);\
+    exit(code);\
+}
+#define DECODE_O_SIZE(control_msg, into)\
+{\
+     into =  ((uint32_t)control_msg[2] << 24) + ((uint32_t)control_msg[3] << 16) +\
              ((uint32_t)control_msg[4] <<  8) + ((uint32_t)control_msg[5] <<  0);\
-}                                                                                                                      
-                                                                                                                       
-#define ENCODE_O_SIZE(control_msg, from)\                                                                              
-{\                                                                                                                     
-    uint32_t f = from; \                                                                                               
-    control_msg[2] = (unsigned char) ((f >> 24) & 0xff); \                                                             
-    control_msg[3] = (unsigned char) ((f >> 16) & 0xff); \                                                             
-    control_msg[4] = (unsigned char) ((f >>  8) & 0xff); \                                                             
+}
+
+#define ENCODE_O_SIZE(control_msg, from)\
+{\
+    uint32_t f = from; \
+    control_msg[2] = (unsigned char) ((f >> 24) & 0xff); \
+    control_msg[3] = (unsigned char) ((f >> 16) & 0xff); \
+    control_msg[4] = (unsigned char) ((f >>  8) & 0xff); \
     control_msg[5] = (unsigned char) ((f >>  0) & 0xff); \
-}     
+}
 
 #define BASE64_LEN( x ) ( x * 4 / 3 + 5 )
 unsigned char * base64_encode( unsigned char* src, size_t len, unsigned char* out, size_t out_len );
 void block_xor(unsigned char* buf, uint64_t start, uint64_t end, unsigned char* masking_key_x3);
+
+
 
 int main(int argc, char **argv)
 {
@@ -87,6 +101,8 @@ int main(int argc, char **argv)
 **  Set up state variables
 ** --------------------------------------------------------------------------------------------------------------------
 */
+
+    parent_pid = getppid();
 
     // ssl variables
     SSL* ssl = NULL;
@@ -126,13 +142,13 @@ int main(int argc, char **argv)
     int ws_state = 0, ws_fin = 0, ws_opcode = 0, ws_wait_for_bytes = 0,
         ws_sent_close_frame = 0, ws_received_close_frame = 0,
         ws_payload_upto = 0, ws_preliminary_size = 0, ws_read_result = 0,
-        ws_back_read = 0, ws_header_back_read = 0, ws_pending_read = 0, 
+        ws_back_read = 0, ws_header_back_read = 0, ws_pending_read = 0,
         ws_multi_frame_total_bytes_received = 0, ws_masking_flag = 0;
     unsigned char ws_buf_header[14];
     char* ws_buffer[4];
     int ws_buffer_fd[4] = {-1, -1, -1, -1};
     int ws_buffer_lock[] = {0, 0}; // 0 is ws_buffer[0], 1, is ws_buffer[1]
-    char* ws_buf_decode = NULL; 
+    char* ws_buf_decode = NULL;
 
     // event loop variables
     struct pollfd fdset[3];
@@ -143,14 +159,14 @@ int main(int argc, char **argv)
 **  Parse commandline arguments
 ** --------------------------------------------------------------------------------------------------------------------
 */
-   { 
+   {
         #define PARSE_INT_OR_EXIT(str, msg, into_int)\
         {\
             if (sscanf(str, "%d", &into_int) != 1)\
                 ABEND(10, "failed to parse integer argument for " msg);\
         }
 
-        int hpws_mode = 0; 
+        int hpws_mode = 0;
         int option_index = 0;
         optind = 1;
 
@@ -183,7 +199,7 @@ int main(int argc, char **argv)
                     hpws_mode |= 2;
                     continue;
                 case 2:
-                    PARSE_INT_OR_EXIT(optarg, "maxmsg", ws_buffer_length); 
+                    PARSE_INT_OR_EXIT(optarg, "maxmsg", ws_buffer_length);
                     continue;
                 case 3:
                     PARSE_INT_OR_EXIT(optarg, "port", port);
@@ -222,21 +238,21 @@ int main(int argc, char **argv)
 
         if (DEBUG)
             fprintf(stderr, "[HPWS.C] hpws mode: %d\n", hpws_mode);
-        
+
         if (hpws_mode <= 0)
             ABEND(20, "must specify either --client or --server");
 
         if (hpws_mode >= 3)
             ABEND(30, "cannot specify both --client and --server, pick only one");
-     
+
         is_server = ( hpws_mode == 1 );
 
         if (!is_server && host[0] == '\0')
             ABEND(40, "must specify --host when invoking as a --client");
-        
+
         if (master_control_fd < 0)
             ABEND(50, "must supply a control FD --cntlfd <fd> as one side of a SOCK_SEQPACKET opened with socketpair");
-    
+
         if (!is_server && arg_control_fd_2 == -1)
             ABEND(41, "must specify --cntlfd2 <fd> when using connect mode, this is the hpcore->hpws line");
     }
@@ -248,7 +264,7 @@ int main(int argc, char **argv)
     if (is_server)
     {
         // RH todo: provide a way for listen loop (server) process to gracefully close and clean up fds
-    
+
         char startup_msg[] = "startup";
         if (send(master_control_fd, startup_msg, sizeof(startup_msg)-1, 0) != sizeof(startup_msg)-1)
             ABEND(60, "could not send startup msg down control fd");
@@ -260,9 +276,9 @@ int main(int argc, char **argv)
                 struct sockaddr sa;
                 struct sockaddr_in sin;
                 struct sockaddr_in6 sin6;
-                struct sockaddr_storage ss; 
+                struct sockaddr_storage ss;
             } addr ;
-         
+
             if (!is_ipv6) {
                 addr.sin.sin_family = AF_INET;
                 addr.sin.sin_port = htons(port);
@@ -286,11 +302,31 @@ int main(int argc, char **argv)
             if (bind(listen_sock, (struct sockaddr*)&(addr.sa), sizeof(addr)) < 0)
                 ABEND(72, "could not bind stocket for listen");
 
-            if (listen(listen_sock, 1) < 0) 
+            if (listen(listen_sock, 1) < 0)
                 ABEND(74, "listen() failed");
         }
 
         for(;;) {
+
+            fdset[0].fd = listen_sock;
+            fdset[0].events = POLLIN;
+
+            if (DEBUG)
+                fprintf(stderr, "[HPWS.C] Accept polling\n");
+
+            int poll_result = poll(&fdset[0], 1, POLL_TIMEOUT);
+
+            if (poll_result < -1)
+            {
+                perror("Accept loop poll");
+                exit(1);
+            }
+
+            if (kill (parent_pid, 0) != 0)
+                GOTO_ERROR("parent process died", parent_exit);
+            
+            if (poll_result == 0)
+                continue;
 
             client_fd = accept(listen_sock, (struct sockaddr*)&client_addr, &client_addr_len);
             if (client_fd < 0) {
@@ -313,7 +349,7 @@ int main(int argc, char **argv)
                 close(client_fd);
                 continue;
             }
-                
+
             // execution to here means we will service the client, send the socketpair fd
             {
                 struct msghdr msg = { 0 };
@@ -347,9 +383,9 @@ int main(int argc, char **argv)
                     close(client_fd);
                     for (int i = 0; i < 4; ++i)
                         close(child_control_fd[i]);
-                    
+
                     continue;
-                }    
+                }
             }
 
             // todo: count clients / sub processes
@@ -359,7 +395,7 @@ int main(int argc, char **argv)
                 close(client_fd);
                 continue;
             }
-            
+
             // fall through to this point in code indicates this is a child process
             close(child_control_fd[1]);
             close(child_control_fd[3]);
@@ -384,7 +420,7 @@ int main(int argc, char **argv)
     {
         control_fd[0] = master_control_fd;
         control_fd[1] = arg_control_fd_2;
-    
+
         if (DEBUG)
             fprintf(stderr, "[HPWS.C] client mode control_fd hpws->hpcore is %d contol_fd hpcore->hpws is %d\n",
                     control_fd[0], control_fd[1]);
@@ -412,11 +448,11 @@ int main(int argc, char **argv)
         client_addr_len = res->ai_addrlen;
 
         char connect_ip[50];
-        if (res->ai_family == AF_INET6) 
+        if (res->ai_family == AF_INET6)
             inet_ntop(AF_INET6, &client_addr.sin6.sin6_addr, connect_ip, sizeof(connect_ip));
-        else 
+        else
             inet_ntop(AF_INET, &client_addr.sin.sin_addr, connect_ip, sizeof(connect_ip));
-    
+
         if (DEBUG)
             fprintf(stderr, "[HPWS.C] ip: %.*s\n", sizeof(connect_ip), connect_ip);
 
@@ -426,10 +462,10 @@ int main(int argc, char **argv)
             perror("[HPWS.C] Unable to connect");
             ABEND(93, "can't connect");
         }
-    
+
         if (DEBUG)
             fprintf(stderr, "[HPWS.C] connected\n");
-   
+
          ws_state = -2; // this state means we need to send an upgrade request
     }
 
@@ -444,7 +480,7 @@ int main(int argc, char **argv)
         // 1. a buffer currently locked by the opposite process (being read)
         // 2. a buffer currently being written to by this process (being written)
         // 3. the buffer being written to will only be handed to the other process
-        //    when the buffer being read from is handed back 
+        //    when the buffer being read from is handed back
         //    this is so there is always a buffer to write into
         ws_buffer_fd[0] = memfd_create("hpws_to_core_1", 0);  // messages for these are on control_fd[0]
         ws_buffer_fd[1] = memfd_create("hpws_to_core_2", 0);
@@ -452,7 +488,7 @@ int main(int argc, char **argv)
         ws_buffer_fd[3] = memfd_create("core_to_hpws_2", 0);
 
         // these record which buffers are awaiting an ack
-        
+
         for (int i = 0; i < 4; ++i) {
             if (ws_buffer_fd[i] < 0) {
                 perror("failed to create memfd\n");
@@ -471,7 +507,7 @@ int main(int argc, char **argv)
             }
             ws_buffer[i] = mapping;
             if (DEBUG)
-                fprintf(stderr, "[HPWS.C] buffer %d maps to fd %d and address %x\n", i, ws_buffer_fd[i], mapping); 
+                fprintf(stderr, "[HPWS.C] buffer %d maps to fd %d and address %x\n", i, ws_buffer_fd[i], mapping);
         }
 
         ws_buf_decode = ws_buffer[0];
@@ -494,7 +530,7 @@ int main(int argc, char **argv)
         if (DEBUG)
             fprintf(stderr, "[HPWS.C] connection established\n");
 
-             
+
         // second thing the new client does is send its buffer fd's to the control line
         struct msghdr msg = { 0 };
         struct cmsghdr *cmsg;
@@ -525,10 +561,10 @@ int main(int argc, char **argv)
 
 /*
 ** --------------------------------------------------------------------------------------------------------------------
-** Set up TLS connection 
+** Set up TLS connection
 ** --------------------------------------------------------------------------------------------------------------------
 */
-    {     
+    {
         #define SSL_FAILED(x) (\
             (x) != SSL_ERROR_WANT_WRITE &&\
             (x) != SSL_ERROR_WANT_READ &&\
@@ -560,8 +596,8 @@ int main(int argc, char **argv)
 
         SSL_load_error_strings();
         OpenSSL_add_ssl_algorithms();
-       
-        { 
+
+        {
             const SSL_METHOD* method = ( is_server ? SSLv23_server_method() : SSLv23_method() );
             ctx = SSL_CTX_new(method);
             if (!ctx) {
@@ -592,9 +628,9 @@ int main(int argc, char **argv)
         status = 0;
 
         fdset[0].events =  POLLERR | POLLHUP | POLLNVAL | POLLIN ;
-        
+
         if (is_server)
-            SSL_set_accept_state(ssl); 
+            SSL_set_accept_state(ssl);
         else {
             SSL_set_connect_state(ssl);
             if (DEBUG)
@@ -604,7 +640,7 @@ int main(int argc, char **argv)
             int e = SSL_get_error(ssl, n);
             SSL_FLUSH_OUT()
         }
-    } 
+    }
 /*
 ** --------------------------------------------------------------------------------------------------------------------
 ** Main event loop
@@ -626,10 +662,24 @@ int main(int argc, char **argv)
             fdset[0].events |=  POLLOUT;
 
         if (DEBUG)
-            fprintf(stderr, "[HPWS.C] polling\n");     
+            fprintf(stderr, "[HPWS.C] polling\n");
 
-        if (!poll(&fdset[0], 3, -1))
+        int poll_result = poll(&fdset[0], 3, POLL_TIMEOUT);
+
+        // check if the parent process died
+        if (kill (parent_pid, 0) != 0)
+            GOTO_ERROR("parent process died", parent_exit);
+
+        if (poll_result < 0)
+            GOTO_ERROR("poll returned negative", poll_error);
+
+        if (poll_result == 0)
+        {
+            // this is a timeout condition
+            if (!SSL_is_init_finished(ssl))
+                GOTO_ERROR("ssl handshake timed out", ssl_error);
             continue;
+        }
 
         if (DEBUG)
             fprintf(stderr, "[HPWS.C] poll returned\n");
@@ -641,20 +691,20 @@ int main(int argc, char **argv)
             socklen_t errlen = sizeof(error);
             getsockopt(client_fd, SOL_SOCKET, SO_ERROR, (void *)&error, &errlen);
             fprintf(stderr, "[HPWS.C] socket error: %d\n", error);
-            GOTO_ERROR("websocket err hup nval", client_closed);   
+            GOTO_ERROR("websocket err hup nval", client_closed);
         }
 
         // ------------------------------------------------------------------------------------------------------------
         // incoming  message on the control line
         // ------------------------------------------------------------------------------------------------------------
-        
+
         // check for errors in the control line
         int dummy_buf[1];
         if (fdset[1].revents & (POLLERR | POLLHUP | POLLNVAL) || read(control_fd[0], dummy_buf, 0))
-                GOTO_ERROR("control fd err hup nval", control_closed);   
-        
+                GOTO_ERROR("control fd err hup nval", control_closed);
+
         if (fdset[2].revents & (POLLERR | POLLHUP | POLLNVAL) || read(control_fd[1], dummy_buf, 0))
-                GOTO_ERROR("control fd err hup nval", control_closed);   
+                GOTO_ERROR("control fd err hup nval", control_closed);
 
         for (int cl = 0; cl <= 1; ++cl)
         if ( fdset[cl+1].revents & POLLIN )
@@ -670,12 +720,14 @@ int main(int argc, char **argv)
             if (DEBUG)
                 fprintf(stderr, "[HPWS.C] control message received on control_fd[%d]=%d: `%.*s`\n",
                         cl, control_fd[cl], bytes_read, control_msg);
- 
+
             if (DEBUG)
             {
                 int n = 0;
                 int err = ioctl(control_fd[cl], FIONREAD, &n);
-                fprintf(stderr, "[HPWS.C] Incoming message and still to read on controlfd[%d]=%d: %d (ioctl=%d)\n",cl, control_fd[cl], n, err);
+                fprintf(stderr,
+                        "[HPWS.C] Incoming message and still to read on controlfd[%d]=%d: %d (ioctl=%d)\n",
+                        cl, control_fd[cl], n, err);
             }
 
             switch (*control_msg)
@@ -689,18 +741,18 @@ int main(int argc, char **argv)
                     {
                         if (bytes_read != 2 || (control_msg[1] != '0' && control_msg[1] != '1'))
                             GOTO_ERROR("received invalid 'c' message from control fd", control_error);
-                        
+
                         if (DEBUG)
                             printf("[HPWS.C] received ack for buffer %c\n", control_msg[1]);
 
                         int unlock = control_msg[1] - '0';
                         ws_buffer_lock[unlock] = 0;
                         if (ws_buf_decode == NULL)
-                            ws_buf_decode =  ws_buffer[unlock]; 
+                            ws_buf_decode =  ws_buffer[unlock];
                     }
                     continue;
                     //break;
-                
+
                 // ----------------------------------------------------------------------------------------------------
                 // incoming control fd message -> outgoing websocket message
                 // ----------------------------------------------------------------------------------------------------
@@ -712,7 +764,7 @@ int main(int argc, char **argv)
                                 bytes_read, control_msg);
                         GOTO_ERROR("received invalid 'o' message from control fd", control_error);
                     }
-                    
+
                     int lock = control_msg[1] - '0' + 2;
                     uint32_t size = 0;
                     DECODE_O_SIZE(control_msg, size);
@@ -753,8 +805,8 @@ int main(int argc, char **argv)
                             // masking key required!
                             unsigned char masking_key[12];
                             if (read(urand_fd, masking_key, 4) != 4)
-                                GOTO_ERROR("could not read 4 bytes from /dev/urandom", internal_error); 
-                            
+                                GOTO_ERROR("could not read 4 bytes from /dev/urandom", internal_error);
+
                             SSL_ENQUEUE(masking_key, 4);
 
                             // expand the key to 3 repeats for the block_xor
@@ -762,11 +814,11 @@ int main(int argc, char **argv)
                                 masking_key[i + 4] = masking_key[i];
                                 masking_key[i + 8] = masking_key[i];
                             }
-                                
+
                             // XOR over the buffer
                             block_xor(ws_buffer[lock], 0, size, masking_key);
                         }
-                     
+
                         SSL_ENQUEUE(ws_buffer[lock], size);
                         SSL_FLUSH_OUT();
                         buf[0] = 'a';
@@ -780,12 +832,12 @@ int main(int argc, char **argv)
                 }
                 default:
                     fprintf(stderr, "[HPWS.C] unknown control message received `%*.s`\n",
-                            bytes_read, control_msg); 
-                    GOTO_ERROR("unknown control message", control_error); 
+                            bytes_read, control_msg);
+                    GOTO_ERROR("unknown control message", control_error);
             }
-            
-        } 
-        
+
+        }
+
         // ------------------------------------------------------------------------------------------------------------
         // outgoing data on the socket
         // ------------------------------------------------------------------------------------------------------------
@@ -795,15 +847,15 @@ int main(int argc, char **argv)
             if (DEBUG)
                 fprintf(stderr, "[HPWS.C] RAW outgoing data %ld\n", bytes_written);
             if (bytes_written <= 0)
-                GOTO_ERROR("unable to write encrypted bytes to socket", ssl_error); 
+                GOTO_ERROR("unable to write encrypted bytes to socket", ssl_error);
             if (bytes_written < ssl_write_len)
                 memmove(ssl_write_buf, ssl_write_buf + bytes_written, ssl_write_len - bytes_written);
             ssl_write_len -= bytes_written;
             ssl_write_buf = (char*)realloc(ssl_write_buf, ssl_write_len);
             if (DEBUG)
-                fprintf(stderr, "[HPWS.C] RAW bytes remaining to write: %d\n", ssl_write_len); 
+                fprintf(stderr, "[HPWS.C] RAW bytes remaining to write: %d\n", ssl_write_len);
         }
-        
+
         // ------------------------------------------------------------------------------------------------------------
         // incoming data on the socket
         // ------------------------------------------------------------------------------------------------------------
@@ -811,30 +863,30 @@ int main(int argc, char **argv)
         {
 
             if (DEBUG)
-                fprintf(stderr, "[HPWS.C] incoming data\n");           
+                fprintf(stderr, "[HPWS.C] incoming data\n");
 
             // either we're here because there is fresh data on the socket that needs to be ingested by SSL or we're
             // here because we already did that previously but there was no free buffer to decode into this branch is
-            // the former 
+            // the former
             if (fdset[0].revents & POLLIN)
             {
                 bytes_read = read(client_fd, ssl_buf, sizeof(ssl_buf));
-                if (bytes_read <= 0) 
+                if (bytes_read <= 0)
                     GOTO_ERROR("client closed connection", client_closed);
-                
+
                 bytes_written = BIO_write(rbio, ssl_buf, bytes_read);
                 if (bytes_written <= 0)
                     GOTO_ERROR("could not write raw bytes to openssl from incoming socket", ssl_error);
-                   
+
                 if ( !SSL_is_init_finished(ssl) ) {
                     if (DEBUG)
                         fprintf(stderr, "[HPWS.C] trying to ssl handshake\n");
                     int n = SSL_do_handshake(ssl);
                     int e = SSL_get_error(ssl, n);
                     SSL_FLUSH_OUT()
-                } 
+                }
             }
-            
+
             if (!SSL_is_init_finished(ssl))
                 goto skip_ws;
 
@@ -921,7 +973,7 @@ int main(int argc, char **argv)
 
                         char request[1024];
 
-                        int snprintf_result = snprintf(request, sizeof(request), 
+                        int snprintf_result = snprintf(request, sizeof(request),
                             "GET %s HTTP/1.1\r\n"
                             "Host: %s\r\n"
                             "Upgrade: websocket\r\n"
@@ -931,15 +983,15 @@ int main(int argc, char **argv)
                             get, host, nonce_b64);
 
                         if (!(snprintf_result > 0 && snprintf_result < sizeof(request)))
-                            GOTO_ERROR("websocket upgrade request longer than buffer, could not connect", 
+                            GOTO_ERROR("websocket upgrade request longer than buffer, could not connect",
                                         ws_handshake_error);
-                        if (DEBUG) 
-                            fprintf(stderr, "[HPWS.C] outgoing websocket upgrade request\n%s--end of request--\n", 
+                        if (DEBUG)
+                            fprintf(stderr, "[HPWS.C] outgoing websocket upgrade request\n%s--end of request--\n",
                                     request);
                         SSL_ENQUEUE(request, snprintf_result);
                         SSL_FLUSH_OUT();
 
-                        ws_state = -1; 
+                        ws_state = -1;
                         goto skip_ws;
 
                     }
@@ -951,7 +1003,7 @@ int main(int argc, char **argv)
                         int bytes_read = SSL_read( ssl, ws_buf_decode, ws_buffer_length - 1 );
                         if (DEBUG)
                             fprintf(stderr, "[HPWS.C] ws_state -1: bytes read: %d\n--\n%.*s\n--\n",
-                                    bytes_read, bytes_read, ws_buf_decode); 
+                                    bytes_read, bytes_read, ws_buf_decode);
 
                         if (bytes_read <= 0)
                             goto skip_ws;
@@ -964,7 +1016,7 @@ int main(int argc, char **argv)
                         char buf[2] = { 'r', '0' }; // send 'ready' message
                         if (send(control_fd[0], buf, 2, 0) != 2)
                             GOTO_ERROR("could not write ready message to control_fd[0]", control_error);
-                        
+
                         if (DEBUG)
                             fprintf(stderr, "[HPWS.C] writing 'r' message to control_fd[1]=%d\n", control_fd[1]);
                         buf[1] = '1';
@@ -981,14 +1033,14 @@ int main(int argc, char **argv)
                         // todo: should we loop to ensure a complete http request?
                         int bytes_read = SSL_read( ssl, ws_buf_decode, ws_buffer_length - 1 );
                         if (DEBUG)
-                            fprintf(stderr, "[HPWS.C] ws_state -2: bytes read: %d\n", bytes_read); 
+                            fprintf(stderr, "[HPWS.C] ws_state -2: bytes read: %d\n", bytes_read);
                         if (bytes_read <= 0)
                             goto skip_ws;
                         ws_buf_decode[bytes_read-1] = '\0';
 
                         static char to_find[] = "Sec-WebSocket-Key:";
                         static char magic_string[] = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11";
-                        
+
                         // isolate the Key
                         char* found = strstr( ws_buf_decode, to_find );
                         if (!found)
@@ -1015,18 +1067,18 @@ int main(int argc, char **argv)
                                        ws_handshake_error);
 
                         strcpy(lineend, magic_string);
-                        
+
                         // compute SHA1 of the magic string
                         unsigned char hash [ SHA_DIGEST_LENGTH ];
                         SHA1( found, ( lineend - found + sizeof(magic_string) - 1 ), hash );
 
                         // encode as base64
-                        char base64[ BASE64_LEN(SHA_DIGEST_LENGTH) ]; 
+                        char base64[ BASE64_LEN(SHA_DIGEST_LENGTH) ];
                         if (!base64_encode( hash, SHA_DIGEST_LENGTH,  base64, sizeof(base64)))
                             GOTO_ERROR("base64 encode failed", ws_handshake_error);
 
-                        // write a repsonse 
-                        int bytes_to_write = snprintf(ws_buf_decode, ws_buffer_length, 
+                        // write a repsonse
+                        int bytes_to_write = snprintf(ws_buf_decode, ws_buffer_length,
                             "HTTP/1.1 101 Switching Protocols\r\n"
                             "Upgrade: websocket\r\n"
                             "Connection: Upgrade\r\n"
@@ -1038,7 +1090,7 @@ int main(int argc, char **argv)
                         SSL_ENQUEUE(ws_buf_decode, bytes_to_write);
                         SSL_FLUSH_OUT()
 
-            
+
 
                         if (DEBUG)
                             fprintf(stderr, "[HPWS.C] sending ready from ws_state 0 (server mode), "
@@ -1064,11 +1116,11 @@ int main(int argc, char **argv)
                         if (ws_multi_frame_total_bytes_received >= sizeof(ws_buf_header))
                             WS_PROTOCOL_ERROR( "tried to read beyond 14 bytes of header" );
 
-                        ws_read_result = 
+                        ws_read_result =
                             SSL_read( ssl,
                                 ws_buf_header + ws_multi_frame_total_bytes_received + ws_header_back_read,
                                 sizeof(ws_buf_header) - ws_multi_frame_total_bytes_received - ws_header_back_read );
-                        
+
                         if (ws_read_result <= 0) {
                             if (!ws_header_back_read)
                                 goto skip_ws;
@@ -1081,7 +1133,7 @@ int main(int argc, char **argv)
                         }
 
                         ws_multi_frame_total_bytes_received += ws_read_result;
-                    } 
+                    }
 
                     // if we are still processing header but need more bytes we will skip
                     if (ws_state < 3 && ws_multi_frame_total_bytes_received < ws_wait_for_bytes)
@@ -1090,7 +1142,7 @@ int main(int argc, char **argv)
                         continue;
                     }
 
-                    // in this state we know we have a header but we don't know how long it is yet, so 
+                    // in this state we know we have a header but we don't know how long it is yet, so
                     // read only the first 2 bytes
                     if ( ws_state == 1 )
                     {
@@ -1100,13 +1152,13 @@ int main(int argc, char **argv)
                         if (ws_buf_header[0] & 0b01110000)
                             WS_PROTOCOL_ERROR("rsv1-3 must be 0");
 
-                        // parse opcode            
+                        // parse opcode
                         ws_fin = ((ws_buf_header[0] >> 7) & 0x1);
 
-                        ws_opcode = ws_buf_header[0] & 0b00001111; 
+                        ws_opcode = ws_buf_header[0] & 0b00001111;
                         if (!ws_opcode && ws_fin)
                             WS_PROTOCOL_ERROR("fin bit set on opcode 0");
-                        
+
                         // check mask flag is present
                         ws_masking_flag = (ws_buf_header[1] >> 7);
 
@@ -1115,11 +1167,11 @@ int main(int argc, char **argv)
 
                         if (is_server && !ws_masking_flag)
                             WS_PROTOCOL_ERROR("masking flag nil but other end is a client");
-             
+
                         // parse size
                         ws_preliminary_size = ws_buf_header[1] & 0b01111111;
 
-                        if (DEBUG) 
+                        if (DEBUG)
                         {
                             fprintf(stderr, "[HPWS.C] ws header: bytes_read %d ws_opcode %d ws_fin %d"
                                     "ws_preliminary_size %d\n", ws_multi_frame_total_bytes_received, ws_opcode,
@@ -1135,7 +1187,7 @@ int main(int argc, char **argv)
                                 break;
                             case 8: // close frame
                                 {
-                                    WS_AT_LEAST(ws_preliminary_size,  ws_multi_frame_total_bytes_received, 
+                                    WS_AT_LEAST(ws_preliminary_size,  ws_multi_frame_total_bytes_received,
                                                 ws_wait_for_bytes);
                                     ws_received_close_frame = 1;
                                     WS_SEND_CLOSE_FRAME(1000, "Bye!");
@@ -1149,11 +1201,11 @@ int main(int argc, char **argv)
                             case 10:  // pong frame, discard
                                 {
                                     // modify the opcode and send it back
-                                    WS_AT_LEAST(ws_preliminary_size, ws_multi_frame_total_bytes_received, 
+                                    WS_AT_LEAST(ws_preliminary_size, ws_multi_frame_total_bytes_received,
                                                 ws_wait_for_bytes);
                                     if (DEBUG)
                                         fprintf(stderr, "[HPWS.C] ping/pong frame\n");
-                                    if (ws_opcode == 9) {        
+                                    if (ws_opcode == 9) {
                                         ws_buf_header[0]++; // its a pong!
                                         if (!ws_sent_close_frame)
                                             SSL_ENQUEUE(ws_buf_header, ws_preliminary_size);
@@ -1175,7 +1227,7 @@ int main(int argc, char **argv)
                     }
 
                     // in this state we have read a preliminary size from state 1 and we know how much more header
-                    // to read  
+                    // to read
                     if (ws_state == 2)
                     {
                         int header_size = 0;
@@ -1183,9 +1235,9 @@ int main(int argc, char **argv)
                             if (DEBUG)
                                 fprintf(stderr, "[HPWS.C] PATH A  %02X %02X %02X %02X\n", ws_buf_header[0],
                                         ws_buf_header[1], ws_buf_header[2], ws_buf_header[3]);
-                            header_size = 4 + ( ws_masking_flag ? 4 : 0 ); 
+                            header_size = 4 + ( ws_masking_flag ? 4 : 0 );
                             WS_AT_LEAST(header_size, ws_multi_frame_total_bytes_received, ws_wait_for_bytes);
-                            ws_payload_bytes_expected=  
+                            ws_payload_bytes_expected=
                                 ((uint64_t)ws_buf_header[2] << 8) + ((uint64_t)ws_buf_header[3] << 0);
                             if (ws_masking_flag)
                                 WS_STORE_MASKING_KEY(ws_masking_key, ws_buf_header, 4);
@@ -1195,13 +1247,13 @@ int main(int argc, char **argv)
                         } else if (ws_preliminary_size == 127) {
                             if (DEBUG)
                                 fprintf(stderr, "[HPWS.C] PATH B\n");
-                            header_size = 10 + ( ws_masking_flag ? 4 : 0 ); 
+                            header_size = 10 + ( ws_masking_flag ? 4 : 0 );
                             WS_AT_LEAST(header_size, ws_multi_frame_total_bytes_received, ws_wait_for_bytes);
-                            ws_payload_bytes_expected = 
-                                ((uint64_t)ws_buf_header[2] << 56) + ((uint64_t)ws_buf_header[3] << 48) + 
-                                ((uint64_t)ws_buf_header[4] << 40) + ((uint64_t)ws_buf_header[5] << 32) + 
-                                ((uint64_t)ws_buf_header[6] << 24) + ((uint64_t)ws_buf_header[7] << 16) + 
-                                ((uint64_t)ws_buf_header[8] << 8) +  ((uint64_t)ws_buf_header[9] << 0); 
+                            ws_payload_bytes_expected =
+                                ((uint64_t)ws_buf_header[2] << 56) + ((uint64_t)ws_buf_header[3] << 48) +
+                                ((uint64_t)ws_buf_header[4] << 40) + ((uint64_t)ws_buf_header[5] << 32) +
+                                ((uint64_t)ws_buf_header[6] << 24) + ((uint64_t)ws_buf_header[7] << 16) +
+                                ((uint64_t)ws_buf_header[8] << 8) +  ((uint64_t)ws_buf_header[9] << 0);
                             if (ws_masking_flag)
                                 WS_STORE_MASKING_KEY(ws_masking_key, ws_buf_header, 10);
                         } else {
@@ -1212,10 +1264,10 @@ int main(int argc, char **argv)
                             ws_payload_bytes_expected = ws_preliminary_size;
                             if (ws_masking_flag)
                                 WS_STORE_MASKING_KEY(ws_masking_key, ws_buf_header, 2);
-                        }          
-                    
+                        }
+
                         if (DEBUG)
-                            fprintf(stderr, "[HPWS.C] payload bytes expected:  %d\n",ws_payload_bytes_expected); 
+                            fprintf(stderr, "[HPWS.C] payload bytes expected:  %d\n",ws_payload_bytes_expected);
 
                         // memcpy unused or extra header bytes (which are actually payload) into ws_buf_decode
                         if (ws_multi_frame_total_bytes_received > header_size) {
@@ -1224,13 +1276,13 @@ int main(int argc, char **argv)
                                 fprintf(stderr, "[HPWS.C] copying %d bytes of payload\n", copied_payload);
                             memcpy( ws_buf_decode + ws_payload_upto, ws_buf_header + header_size, copied_payload );
                             ws_back_read = copied_payload;
-                        } 
+                        }
                         ws_multi_frame_total_bytes_received = 0;
                         ws_state = 3;
                         SSL_FLUSH_OUT();
                         // this state drops through to the next
                     }
-                    
+
 
                     // in this state we are reading payload and decoding it according to masking key
                     if (ws_state == 3)
@@ -1238,15 +1290,15 @@ int main(int argc, char **argv)
                         ws_pending_read = 0;
                         ws_payload_bytes_remaining =
                             ws_payload_bytes_expected - ws_payload_upto;
-                        
+
                         // read into decode buffer
                         int buffer_bytes_left =
                                 ws_buffer_length - ws_multi_frame_total_bytes_received -
                                 ws_payload_upto - 8 - ws_back_read;
-                        
+
                         if (ws_payload_bytes_remaining > buffer_bytes_left)
                             WS_PROTOCOL_ERROR( "payload message exceeded maximum messagesize" ) ;
-                        // RH TODO make this a ws maxsize error 
+                        // RH TODO make this a ws maxsize error
 
                         ws_read_result =
                             SSL_read( ssl,
@@ -1263,11 +1315,11 @@ int main(int argc, char **argv)
                             ws_read_result += ws_back_read;
                             ws_back_read = 0;
                         }
-                        
+
                         if (DEBUG)
                             fprintf(stderr, "[HPWS.C] ws_state = 3: bytes read : %d\n== "
                                     "payload_bytes_remaining: %d\n", ws_read_result, ws_payload_bytes_remaining );
-               
+
                         // there can be overshoot due to backread,
                         // so in this scenario we copy back into header buf
 
@@ -1281,8 +1333,8 @@ int main(int argc, char **argv)
                                 WS_PROTOCOL_ERROR( "could not back-backcopy header bytes from decode buffer, "
                                                    "header bytes too long");
                             memcpy( ws_buf_header,
-                                    ws_buf_decode + ws_multi_frame_total_bytes_received + ws_payload_upto + 
-                                    ws_payload_bytes_remaining, spare_header_bytes );  
+                                    ws_buf_decode + ws_multi_frame_total_bytes_received + ws_payload_upto +
+                                    ws_payload_bytes_remaining, spare_header_bytes );
 
                             ws_read_result = ws_payload_bytes_remaining;
                             ws_header_back_read = spare_header_bytes;
@@ -1295,7 +1347,7 @@ int main(int argc, char **argv)
                                 fprintf(stderr, "[HPWS.C] PATH 1\n");
                             ws_payload_next = ws_payload_bytes_remaining + ws_payload_upto;
                             ws_state = 4;
-                        }         
+                        }
 
                         if (DEBUG)
                             fprintf(stderr, "[HPWS.C] ws_state = 3: masking key loop:  %08X - offset: %d, %d - %d, "
@@ -1305,17 +1357,17 @@ int main(int argc, char **argv)
 
                         if (ws_masking_key)
                             block_xor(ws_buf_decode, ws_payload_upto, ws_payload_next, ws_masking_key);
-                       
+
                         if (ws_state != 4)
                               ws_payload_upto = ws_payload_next;
 
                         SSL_FLUSH_OUT();
                         // this state falls through to the next
-                        
+
                     }
 
-                    // in this state we have received a complete message 
-                    if (ws_state == 4) 
+                    // in this state we have received a complete message
+                    if (ws_state == 4)
                     {
                         if (ws_fin)
                         {
@@ -1327,24 +1379,24 @@ int main(int argc, char **argv)
                                     to_print = (int)ws_payload_bytes_expected;
                                 fprintf(stderr,
                                         "[HPWS.C] ws_state = 4: (%05d: %02d/%02d - %d offset: %d packet: "
-                                        "`%.*s`%s`%.*s`\n", 
+                                        "`%.*s`%s`%.*s`\n",
                                         line++,
                                         ws_payload_bytes_remaining,
-                                        ws_payload_bytes_expected, 
+                                        ws_payload_bytes_expected,
                                         ws_fin,
-                                        ws_payload_bytes_expected, 
+                                        ws_payload_bytes_expected,
                                         to_print,
                                         ws_buf_decode,
                                         ( ((int)ws_payload_bytes_expected < to_print) ? "": "..." ),
                                         ( ((int)ws_payload_bytes_expected < to_print) ? 0: 20 ),
-                                        ( ((int)ws_payload_bytes_expected < to_print) ? "": (ws_buf_decode + 
-                                            ws_payload_bytes_expected - 20))); 
-                                
+                                        ( ((int)ws_payload_bytes_expected < to_print) ? "": (ws_buf_decode +
+                                            ws_payload_bytes_expected - 20)));
+
 
                             }
 
                             int sending_buf = ( ws_buf_decode == ws_buffer[0] ? 0 : 1 );
-            
+
 
                             uint32_t len = (uint32_t)ws_payload_next;
                             if (DEBUG)
@@ -1352,7 +1404,7 @@ int main(int argc, char **argv)
                                         sending_buf, len);
                             unsigned char control_msg[6] = { 'o', '0' + sending_buf, 0, 0, 0, 0 };
                             ENCODE_O_SIZE(control_msg, len);
- 
+
                             if (DEBUG)
                                 fprintf(stderr, "[HPWS.C] sending o msg len: %d\n", ws_payload_next);
 
@@ -1369,14 +1421,14 @@ int main(int argc, char **argv)
 
                             ws_payload_upto = 0;
                             ws_multi_frame_total_bytes_received = 0;
-                        } 
+                        }
 
                         ws_state = 1;
                         SSL_FLUSH_OUT();
                         // loops back to start incase another frame starts in this packet
                     }
 
-                    if (ws_state > 4 || ws_state < -2) 
+                    if (ws_state > 4 || ws_state < -2)
                     {
                         WS_SEND_CLOSE_FRAME(1001, "internal error");
                         GOTO_ERROR("ws internal error", ws_protocol_error);
@@ -1398,7 +1450,7 @@ int main(int argc, char **argv)
         // encrypt pending ssl queue
         if (!SSL_is_init_finished(ssl))
             continue;
-        
+
         while (ssl_encrypt_len > 0) {
             int bytes_written = SSL_write(ssl, ssl_encrypt_buf, ssl_encrypt_len);
 
@@ -1422,13 +1474,15 @@ int main(int argc, char **argv)
               break;
         }
 
-        if (DEBUG) 
-            fprintf(stderr, "[HPWS.C] end of event loop, back to start\n");    
+        if (DEBUG)
+            fprintf(stderr, "[HPWS.C] end of event loop, back to start\n");
     }
 
     if (DEBUG)
         fprintf(stderr, "[HPWS.C] main event loop ended\n");
 
+    parent_exit:;
+    poll_error:;
     ws_handshake_error:;
     ws_protocol_error:;
     ws_graceful_close:;
@@ -1462,7 +1516,7 @@ int main(int argc, char **argv)
 }
 
 
-unsigned char * base64_encode( unsigned char* src, size_t len, unsigned char* out, size_t out_len ) 
+unsigned char * base64_encode( unsigned char* src, size_t len, unsigned char* out, size_t out_len )
 {
     // base64 code from http://web.mit.edu/freebsd/head/contrib/wpa/src/utils/base64.c
     static const unsigned char base64_table[65] =
@@ -1521,18 +1575,18 @@ void block_xor(unsigned char* restrict buf, uint64_t start, uint64_t end, unsign
 
         for (; i < start_boundary; ++i)
              *(buf + i) ^= masking_key_x3[i % 4];
-        
+
         // this is a further optimisation since incrementing by 8 doesnt change %4
-        uint8_t key_offset = i % 4; 
+        uint8_t key_offset = i % 4;
 
         for(; i < end_boundary; i += 8)
             *(uint64_t*)(buf + i) ^=
                 *((uint64_t*)(masking_key_x3 + key_offset));
 
-        for (; i < end; ++i) 
+        for (; i < end; ++i)
              *(buf + i) ^= ((unsigned char*)masking_key_x3)[ i % 4 ];
 
-    } else 
+    } else
         for (; i < end; ++i)
              *(buf + i) ^= ((unsigned char*)masking_key_x3)[i % 4];
 }

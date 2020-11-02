@@ -30,6 +30,7 @@ void proc_exit(int x)
 				return;
 			else
 				fprintf (stderr, "[TEST.CPP] Child exit - Return code: %d\n", wstat);
+            sleep(1);
 		}
 }
 
@@ -95,43 +96,45 @@ int example_server() {
         fprintf(stderr, "[TEST.CPP] we got a server\n");
 
         while (1) {
-        auto accept_result = std::get<hpws::server>(server).accept();
+            auto accept_result = std::get<hpws::server>(server).accept();
 
-        if (std::holds_alternative<hpws::client>(accept_result)) {
-            fprintf(stderr, "[TEST.CPP] a client connected\n");
-        } else {
-            PRINT_HPWS_ERROR(accept_result);
-            return 1;
-        }
-
-        auto client = std::get<hpws::client>(std::move(accept_result));
-        int counter = 0;
-        client.write("server to client msg1\n");
-        for(;;) {
-            auto read_result = client.read();
-            if ( std::holds_alternative<hpws::error>(read_result) ) {
-                PRINT_HPWS_ERROR(read_result);
-                //return 1;
-                break;
+            fprintf(stderr, "HERE1\n");
+            if (std::holds_alternative<hpws::client>(accept_result)) {
+                fprintf(stderr, "[TEST.CPP] a client connected\n");
+            } else {
+                PRINT_HPWS_ERROR(accept_result);
+                continue;
             }
 
-            std::string_view s = std::get<std::string_view>(read_result);
-            
-            //printf("got message from hpws: `%.*s`\n", s.size(), s.data());
-            fprintf(stderr, "[TEST.CPP] %.*s", (int)s.size(), s.data());
-            fprintf(stderr, "[TEST.CPP] got message size: %d\n", (int)s.size());
-            fprintf(stderr, "[TEST.CPP] contained: `");
-            for (int i = 0; i < s.size(); ++i)
-                putc(s[i], stderr);
-            fprintf(stderr,"`\n");           
- 
-            client.ack(s);    
+            auto client = std::get<hpws::client>(std::move(accept_result));
+            int counter = 0;
+            client.write("server to client msg1\n");
+            for(;;) {
+                auto read_result = client.read();
+                if ( std::holds_alternative<hpws::error>(read_result) ) {
+                    fprintf(stderr, "accept loop error\n");
+                    PRINT_HPWS_ERROR(read_result);
+                    //return 1;
+                    break;
+                }
 
-            char out[1024];
-            sprintf(out, "message from server: %d\n", ++counter);
-            client.write(out);
+                std::string_view s = std::get<std::string_view>(read_result);
+                
+                //printf("got message from hpws: `%.*s`\n", s.size(), s.data());
+                fprintf(stderr, "[TEST.CPP] %.*s", (int)s.size(), s.data());
+                fprintf(stderr, "[TEST.CPP] got message size: %d\n", (int)s.size());
+                fprintf(stderr, "[TEST.CPP] contained: `");
+                for (int i = 0; i < s.size(); ++i)
+                    putc(s[i], stderr);
+                fprintf(stderr,"`\n");           
+     
+                client.ack(s);    
 
-        }
+                char out[1024];
+                sprintf(out, "message from server: %d\n", ++counter);
+                client.write(out);
+
+            }
         }
 
     } else if ( std::holds_alternative<hpws::error>(server) )  {
