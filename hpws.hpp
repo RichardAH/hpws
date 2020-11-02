@@ -310,6 +310,8 @@ namespace hpws
             int error_code = -1;
             const char *error_msg = NULL;
             int fd[4] = {-1, -1, -1, -1}; // 0,1 are hpws->hpcore, 2,3 are hpcore->hpws
+            int buffer_fd[4] = {-1, -1, -1, -1};
+            void *mapping[4] = { NULL, NULL, NULL, NULL};
             int pid = -1;
             int count_args = 14 + argv.size();
             char const **argv_pass = NULL;
@@ -410,8 +412,6 @@ namespace hpws
                     fprintf(stderr, "[HPWS.HPP] waiting for buffer fds\n");
 
                 // second thing we will receive is the four fds for the buffers
-                int buffer_fd[4] = {-1, -1, -1, -1};
-                void *mapping[4];
                 {
                     struct msghdr child_msg = {0};
                     memset(&child_msg, 0, sizeof(child_msg));
@@ -510,8 +510,14 @@ namespace hpws
                 waitpid(pid, &status, 0 /* should we use WNOHANG? */);
             }
             for (int i = 0; i < 4; ++i)
+            {
                 if (fd[i] > 0)
                     close(fd[i]);
+                if (mapping[i] != MAP_FAILED && mapping[i] != NULL)
+                    munmap(mapping[i], max_buffer_size);
+                if (buffer_fd[i] > -1)
+                    close(buffer_fd[i]);
+            }
 
             return error{error_code, std::string{error_msg}};
         }
