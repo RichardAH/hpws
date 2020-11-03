@@ -1,6 +1,6 @@
-#include <signal.h>
 #include <sys/wait.h>
 #include <sys/resource.h>
+#include <sys/prctl.h>
 #include <variant>
 #include <vector>
 #include "hpws.hpp"
@@ -17,25 +17,12 @@
 
 int example_server();
 int example_client();
-void proc_exit(int x)
-{
-		int wstat;
-		pid_t pid;
-
-		while (1) {
-			pid = wait3 (&wstat, WNOHANG, (struct rusage *)NULL );
-			if (pid == 0)
-				return;
-			else if (pid == -1)
-				return;
-			else
-				fprintf (stderr, "[TEST.CPP] Child exit - Return code: %d\n", wstat);
-            sleep(1);
-		}
-}
 
 int main(int argc, char** argv) {
-    signal (SIGCHLD, proc_exit);
+
+    // Become a sub-reaper so we can gracefully reap hpws child processes via hpws.hpp.
+    // (Otherwise they will get reaped by OS init process and we'll end up with race conditions with gracefull kills)
+    prctl(PR_SET_CHILD_SUBREAPER, 1);
 
     if (argc > 1 && argv[1][0] == 'c')
         return example_client();
