@@ -1,4 +1,3 @@
-#include <signal.h>
 #include <sys/wait.h>
 #include <sys/resource.h>
 #include <variant>
@@ -17,25 +16,8 @@
 
 int example_server();
 int example_client();
-void proc_exit(int x)
-{
-		int wstat;
-		pid_t pid;
-
-		while (1) {
-			pid = wait3 (&wstat, WNOHANG, (struct rusage *)NULL );
-			if (pid == 0)
-				return;
-			else if (pid == -1)
-				return;
-			else
-				fprintf (stderr, "[TEST.CPP] Child exit - Return code: %d\n", wstat);
-            sleep(1);
-		}
-}
 
 int main(int argc, char** argv) {
-    signal (SIGCHLD, proc_exit);
 
     if (argc > 1 && argv[1][0] == 'c')
         return example_client();

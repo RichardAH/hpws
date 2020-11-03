@@ -54,6 +54,7 @@
 #include <netdb.h>
 #include <sys/ioctl.h>
 #include <sys/prctl.h>
+#include <signal.h>
 
 pid_t parent_pid = -1; // we set this on startup
 
@@ -91,10 +92,12 @@ pid_t parent_pid = -1; // we set this on startup
 unsigned char * base64_encode( unsigned char* src, size_t len, unsigned char* out, size_t out_len );
 void block_xor(unsigned char* buf, uint64_t start, uint64_t end, unsigned char* masking_key_x3);
 
-
-
 int main(int argc, char **argv)
 {
+    // No zombies. We simply let our direct children vanish.
+    // When a child needs to be wait()ed by it's consumer (hpws.hpp), the child double-forks and
+    // we require the consumer to be a subreaper. This will detach the child from hpws parent proc.
+    signal (SIGCHLD, SIG_IGN);
 
 /*
 ** --------------------------------------------------------------------------------------------------------------------
@@ -403,7 +406,14 @@ int main(int argc, char **argv)
             control_fd[1] = child_control_fd[2];
             close(listen_sock);
 
-            // send pid down the line as a four byte integer
+            // by default, hpws server process is our parent and "reaper".
+            // now we assume the consumer (hpws.hpp) is going to become our "reaper" so we double-fork
+            // to detach ourselves from hpws server proc.
+            if (fork())
+                exit(0);
+
+            // reaching here means we are a detached child and we should get reaped by consumer (hpws.hpp).
+            // send self pid down the control line as a four byte integer
             uint32_t to_send = (uint32_t)getpid();
             if (send(control_fd[0], (unsigned char*)(&to_send), sizeof(uint32_t), 0) < sizeof(uint32_t))
                 ABEND(80, "could not send pid down control line");

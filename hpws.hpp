@@ -540,6 +540,26 @@ namespace hpws
         server(pid_t server_pid, int master_control_fd, uint32_t max_buffer_size)
             : server_pid_(server_pid), master_control_fd_(master_control_fd), max_buffer_size_(max_buffer_size) {}
 
+        void accept_cleanup(void *mapping[4], int child_fd[2], int buffer_fd[4], uint32_t pid_child)
+        {
+            for (int i = 0; i < 4; i++)
+            {
+                if (mapping[i] != MAP_FAILED && mapping[i] != NULL)
+                    munmap(mapping[i], max_buffer_size_);
+                if (i < 2 && child_fd[i] > -1)
+                    close(child_fd[i]);
+                if (buffer_fd[i] > -1)
+                    close(buffer_fd[i]);
+            }
+
+            if (pid_child > 0)
+            {
+                int ret1 = kill(pid_child, SIGTERM);
+                int wstat;
+                int ret2 = waitpid(pid_child, &wstat, 0);
+            }
+        }
+
     public:
         // No copy constructor
         server(const server &) = delete;
@@ -569,23 +589,17 @@ namespace hpws
 
         std::variant<client, error> accept(const bool no_block = false)
         {
-#define HPWS_ACCEPT_ERROR(code, msg)                            \
-    {                                                           \
-        for (int i = 0; i < 4; i++)                             \
-        {                                                       \
-            if (mapping[i] != MAP_FAILED && mapping[i] != NULL) \
-                munmap(mapping[i], max_buffer_size_);           \
-            if (i < 2 && child_fd[i] > -1)                      \
-                close(child_fd[i]);                             \
-            if (buffer_fd[i] > -1)                              \
-                close(buffer_fd[i]);                            \
-        }                                                       \
-        return error{code, msg};                                \
+#define HPWS_ACCEPT_ERROR(code, msg)                      \
+    {                                                     \
+        accept_cleanup(mapping, child_fd, buffer_fd, pid); \
+        return error{code, msg};                          \
     }
-
+    
             int child_fd[2] = {-1, -1};
             int buffer_fd[4] = {-1, -1, -1, -1};
             void *mapping[4] = {NULL, NULL, NULL, NULL};
+            // must not use pid_t here since we transfer across IPC channel as a uint32.
+            uint32_t pid = 0;
 
             {
                 struct msghdr child_msg = {0};
@@ -636,8 +650,6 @@ namespace hpws
                 HPWS_ACCEPT_ERROR(202, "timeout waiting for hpws accept child message");
 
             // first thing we'll receive is the pid of the client
-            // must not use pid_t here since we transfer across IPC channel as a uint32.
-            uint32_t pid = 0;
             if (recv(child_fd[0], (unsigned char *)(&pid), sizeof(pid), 0) < sizeof(pid))
                 HPWS_ACCEPT_ERROR(212, "did not receive expected 4 byte pid of child process on accept");
 
