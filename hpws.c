@@ -416,7 +416,11 @@ int main(int argc, char **argv)
             // send self pid down the control line as a four byte integer
             uint32_t to_send = (uint32_t)getpid();
             if (send(control_fd[0], (unsigned char*)(&to_send), sizeof(uint32_t), 0) < sizeof(uint32_t))
+            {
+                // TODO: If for some reason pid sending failed, then we'll end up as a zombie since the consumer process
+                // cannot reap us without knowing our pid. Currently there's no way to avoid this.
                 ABEND(80, "could not send pid down control line");
+            }
 
             break;
         }

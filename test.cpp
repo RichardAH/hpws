@@ -1,5 +1,6 @@
 #include <sys/wait.h>
 #include <sys/resource.h>
+#include <sys/prctl.h>
 #include <variant>
 #include <vector>
 #include "hpws.hpp"
@@ -18,6 +19,10 @@ int example_server();
 int example_client();
 
 int main(int argc, char** argv) {
+
+    // Become a sub-reaper so we can gracefully reap hpws child processes via hpws.hpp.
+    // (Otherwise they will get reaped by OS init process and we'll end up with race conditions with gracefull kills)
+    prctl(PR_SET_CHILD_SUBREAPER, 1);
 
     if (argc > 1 && argv[1][0] == 'c')
         return example_client();
