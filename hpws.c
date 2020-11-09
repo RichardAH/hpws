@@ -780,7 +780,7 @@ int main(int argc, char **argv)
                     }
 
                     int lock = control_msg[1] - '0' + 2;
-                    uint32_t size = 0;
+                    uint64_t size = 0;
                     DECODE_O_SIZE(control_msg, size);
 
                     if (DEBUG)
@@ -1306,7 +1306,7 @@ int main(int argc, char **argv)
                             ws_payload_bytes_expected - ws_payload_upto;
 
                         // read into decode buffer
-                        int buffer_bytes_left =
+                        uint64_t buffer_bytes_left =
                                 ws_buffer_length - ws_multi_frame_total_bytes_received -
                                 ws_payload_upto - 8 - ws_back_read;
 
