@@ -141,7 +141,7 @@ int main(int argc, char **argv)
     uint64_t ws_payload_bytes_expected = 0;
     uint64_t ws_payload_bytes_remaining = 0;
     uint64_t ws_payload_next = 0;
-    int ws_buffer_length = (16*1024*1024);
+    uint64_t ws_buffer_length = (16*1024*1024);
     int ws_state = 0, ws_fin = 0, ws_opcode = 0, ws_wait_for_bytes = 0,
         ws_sent_close_frame = 0, ws_received_close_frame = 0,
         ws_payload_upto = 0, ws_preliminary_size = 0, ws_read_result = 0,
@@ -202,8 +202,11 @@ int main(int argc, char **argv)
                     hpws_mode |= 2;
                     continue;
                 case 2:
+                {
                     PARSE_INT_OR_EXIT(optarg, "maxmsg", ws_buffer_length);
+                    ws_buffer_length += 14; // add header byte space
                     continue;
+                }
                 case 3:
                     PARSE_INT_OR_EXIT(optarg, "port", port);
                     continue;
@@ -1308,8 +1311,13 @@ int main(int argc, char **argv)
                         // read into decode buffer
                         uint64_t buffer_bytes_left =
                                 ws_buffer_length - ws_multi_frame_total_bytes_received -
-                                ws_payload_upto - 8 - ws_back_read;
-
+                                /*ws_payload_upto -*/ 8 - ws_back_read;
+                        if (DEBUG)
+                        fprintf(stderr, "[HPWS.C] buffer_bytes_left: %llu, ws_multi_frame_total_bytes_received: %llu"
+                                        "\n[HPWS.C] ws_payload_upto: %llu, ws_back_read: %llu, ws_buffer_length: %llu"
+                                        "\n", buffer_bytes_left, ws_multi_frame_total_bytes_received, ws_payload_upto,
+                                        ws_back_read, ws_buffer_length);
+                                        
                         if (ws_payload_bytes_remaining > buffer_bytes_left)
                             WS_PROTOCOL_ERROR( "payload message exceeded maximum messagesize" ) ;
                         // RH TODO make this a ws maxsize error
