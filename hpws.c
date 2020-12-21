@@ -271,10 +271,6 @@ int main(int argc, char **argv)
     {
         // RH todo: provide a way for listen loop (server) process to gracefully close and clean up fds
 
-        char startup_msg[] = "startup";
-        if (send(master_control_fd, startup_msg, sizeof(startup_msg)-1, 0) != sizeof(startup_msg)-1)
-            ABEND(60, "could not send startup msg down control fd");
-
         // listen in an accept loop
         int listen_sock = -1;
         {
@@ -311,6 +307,10 @@ int main(int argc, char **argv)
             if (listen(listen_sock, 1) < 0)
                 ABEND(74, "listen() failed");
         }
+
+        char startup_msg[] = "startup";
+        if (send(master_control_fd, startup_msg, sizeof(startup_msg)-1, 0) != sizeof(startup_msg)-1)
+            ABEND(60, "could not send startup msg down control fd");
 
         for(;;) {
 
