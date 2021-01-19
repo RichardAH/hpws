@@ -42,15 +42,12 @@ int example_client() {
 
     auto client = std::move(std::get<hpws::client>(accept_result));
 
-
     {
         int msgcounter = 0;
         fprintf(stderr, "[TEST.CPP] sending message\n");
         //client.write("a message from the client\n");
         
         for(;;) {
-
-
 
             auto read_result = client.read();
             if ( std::holds_alternative<hpws::error>(read_result) ) {
@@ -72,7 +69,6 @@ int example_client() {
             client.write(out);
         }
     }
-
 }
 
 
@@ -109,11 +105,19 @@ int example_server() {
                 //printf("got message from hpws: `%.*s`\n", s.size(), s.data());
 //                fprintf(stderr, "[TEST.CPP] %.*s", (int)s.size(), s.data());
                 fprintf(stderr, "[TEST.CPP] got message size: %d\n", (int)s.size());
-                fprintf(stderr, "[TEST.CPP] contained: `");
-                for (int i = 0; i < 5; ++i)
-                    putc(s[i], stderr);
-                fprintf(stderr,"`\n");           
-     
+                if (s.size() <= 40)
+                    fprintf(stderr, "[TEST.CPP] contained: `%.*s`\n", (int)s.size(), s.data()); 
+                else
+                {
+                    fprintf(stderr, "[TEST.CPP] contained: `");
+                    for (int i = 0; i < 20; ++i)
+                        putc(s[i], stderr);
+                    fprintf(stderr,"`\n");
+                    fprintf(stderr, "`...`");
+                    for (int i = (int)s.size() - 20; i < s.size(); ++i)
+                        putc(s[i], stderr);
+                    fprintf(stderr, "`\n");
+                }
                 client.ack(s);    
 
                 char out[1024];

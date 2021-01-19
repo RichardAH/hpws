@@ -31,7 +31,7 @@
 **  Config
 ** --------------------------------------------------------------------------------------------------------------------
 */
-#define DEBUG 0
+#define DEBUG 1
 #define VERBOSE_DEBUG 0
 #define SSL_BUFFER_LENGTH 4096
 #define POLL_TIMEOUT 500 /* ms */
@@ -1407,6 +1407,14 @@ int main(int argc, char **argv)
                                 (*(uint32_t*)(ws_masking_key)), (ws_payload_upto % 4), ws_payload_upto,
                                 ws_payload_next, ws_multi_frame_bytes);
 
+
+                        if (DEBUG)
+                        fprintf(stderr, "[HPWS.C] KEY %02X %02X %02X %02X\n",
+                            ws_masking_key[0] & 0xFFU,
+                            ws_masking_key[1] & 0xFFU,
+                            ws_masking_key[2] & 0xFFU,
+                            ws_masking_key[3] & 0xFFU);
+
                         if (DEBUG)
                         fprintf(stderr, "[HPWS.C] BEFORE DECODE ws_buf_decode[%d] = %02X %02X %02X %02X %02X %02X\n",
                             ws_multi_frame_bytes + ws_payload_upto, 
@@ -1420,20 +1428,22 @@ int main(int argc, char **argv)
                         if (ws_masking_key)
                             block_xor(ws_buf_decode,
                             ws_multi_frame_bytes + ws_payload_upto, 
-                            ws_payload_next,
+                            ws_multi_frame_bytes + ws_payload_next,
                             ws_masking_key, 
                             0);
                         
                         if (DEBUG)
-                        fprintf(stderr, "[HPWS.C] AFTER DECODE  ws_buf_decode[%d] = %02X %02X %02X %02X %02X %02X\n",
-                            ws_multi_frame_bytes + ws_payload_upto, 
-                            ws_buf_decode[ws_multi_frame_bytes + ws_payload_upto + 0] & 0xFFU,
-                            ws_buf_decode[ws_multi_frame_bytes + ws_payload_upto + 1] & 0xFFU,
-                            ws_buf_decode[ws_multi_frame_bytes + ws_payload_upto + 2] & 0xFFU,
-                            ws_buf_decode[ws_multi_frame_bytes + ws_payload_upto + 3] & 0xFFU,
-                            ws_buf_decode[ws_multi_frame_bytes + ws_payload_upto + 4] & 0xFFU,
-                            ws_buf_decode[ws_multi_frame_bytes + ws_payload_upto + 5] & 0xFFU);
-                        
+                        {
+                            fprintf(stderr, "[HPWS.C] AFTER DECODE  ws_buf_decode[%d] = "
+                                            "%02X %02X %02X %02X %02X %02X\n",
+                                ws_multi_frame_bytes + ws_payload_upto, 
+                                ws_buf_decode[ws_multi_frame_bytes + ws_payload_upto + 0] & 0xFFU,
+                                ws_buf_decode[ws_multi_frame_bytes + ws_payload_upto + 1] & 0xFFU,
+                                ws_buf_decode[ws_multi_frame_bytes + ws_payload_upto + 2] & 0xFFU,
+                                ws_buf_decode[ws_multi_frame_bytes + ws_payload_upto + 3] & 0xFFU,
+                                ws_buf_decode[ws_multi_frame_bytes + ws_payload_upto + 4] & 0xFFU,
+                                ws_buf_decode[ws_multi_frame_bytes + ws_payload_upto + 5] & 0xFFU);
+                        }
                         ws_back_read = 0;
 
                         ws_payload_upto = ws_payload_next;
@@ -1446,38 +1456,38 @@ int main(int argc, char **argv)
                     // in this state we have received a complete message
                     if (ws_state == 4)
                     {
+                        if (DEBUG) {
+                            static int line = 0;
+                            int to_print = 20;
+                            if ((int)ws_payload_bytes_expected < to_print)
+                                to_print = (int)ws_payload_bytes_expected;
+                            fprintf(stderr,
+                                    "[HPWS.C] ws_state = 4: (%05d: %02d/%02d - %d offset: %d "
+                                    "packet[%02X %02X %02X %02X %02X %02X]: "
+                                    "`%.*s`%s`%.*s`\n",
+                                    line++,
+                                    ws_payload_bytes_remaining,
+                                    ws_payload_bytes_expected,
+                                    ws_fin,
+                                    ws_payload_bytes_expected,
+                                    ws_buf_decode[ws_multi_frame_bytes + 0] & 0xFFU,
+                                    ws_buf_decode[ws_multi_frame_bytes + 1] & 0xFFU,
+                                    ws_buf_decode[ws_multi_frame_bytes + 2] & 0xFFU,
+                                    ws_buf_decode[ws_multi_frame_bytes + 3] & 0xFFU,
+                                    ws_buf_decode[ws_multi_frame_bytes + 4] & 0xFFU,
+                                    ws_buf_decode[ws_multi_frame_bytes + 5] & 0xFFU,
+                                    to_print,
+                                    ws_buf_decode + ws_multi_frame_bytes,
+                                    ( ((int)ws_payload_bytes_expected < to_print) ? "": "..." ),
+                                    ( ((int)ws_payload_bytes_expected < to_print) ? 0: 20 ),
+                                    ( ((int)ws_payload_bytes_expected < to_print) ? "": (ws_buf_decode +
+                                        ws_multi_frame_bytes + ws_payload_bytes_expected - 20)));
+
+
+                        }
                         if (ws_fin)
                         {
                             // final frame in the fragment so we need to send a control line msg and swap buffers
-                            if (DEBUG) {
-                                static int line = 0;
-                                int to_print = 20;
-                                if ((int)ws_payload_bytes_expected < to_print)
-                                    to_print = (int)ws_payload_bytes_expected;
-                                fprintf(stderr,
-                                        "[HPWS.C] ws_state = 4: (%05d: %02d/%02d - %d offset: %d "
-                                        "packet[%02X %02X %02X %02X %02X %02X]: "
-                                        "`%.*s`%s`%.*s`\n",
-                                        line++,
-                                        ws_payload_bytes_remaining,
-                                        ws_payload_bytes_expected,
-                                        ws_fin,
-                                        ws_payload_bytes_expected,
-                                        ws_buf_decode[0] & 0xFFU,
-                                        ws_buf_decode[1] & 0xFFU,
-                                        ws_buf_decode[2] & 0xFFU,
-                                        ws_buf_decode[3] & 0xFFU,
-                                        ws_buf_decode[4] & 0xFFU,
-                                        ws_buf_decode[5] & 0xFFU,
-                                        to_print,
-                                        ws_buf_decode,
-                                        ( ((int)ws_payload_bytes_expected < to_print) ? "": "..." ),
-                                        ( ((int)ws_payload_bytes_expected < to_print) ? 0: 20 ),
-                                        ( ((int)ws_payload_bytes_expected < to_print) ? "": (ws_buf_decode +
-                                            ws_payload_bytes_expected - 20)));
-
-
-                            }
 
                             int sending_buf = ( ws_buf_decode == ws_buffer[0] ? 0 : 1 );
 
@@ -1488,9 +1498,6 @@ int main(int argc, char **argv)
                                         sending_buf, len);
                             unsigned char control_msg[6] = { 'o', '0' + sending_buf, 0, 0, 0, 0 };
                             ENCODE_O_SIZE(control_msg, len);
-
-                            if (DEBUG)
-                                fprintf(stderr, "[HPWS.C] sending o msg len: %d\n", ws_payload_next);
 
                             send(control_fd[0], control_msg, 6, 0);
                             // do the buffer swap
@@ -1662,19 +1669,19 @@ void block_xor(unsigned char* restrict buf, uint64_t start, uint64_t end, unsign
     {
 
         for (; i < start_boundary; ++i)
-             *(buf + i) ^= masking_key_x3[i % 4];
+             *(buf + i) ^= masking_key_x3[(i + key_offset_) % 4];
 
         // this is a further optimisation since incrementing by 8 doesnt change %4
-        uint8_t key_offset = (i + key_offset_) % 4;
+        uint8_t key_offset = (key_offset_ + i) % 4;
 
         for(; i < end_boundary; i += 8)
             *(uint64_t*)(buf + i) ^=
                 *((uint64_t*)(masking_key_x3 + key_offset));
 
         for (; i < end; ++i)
-             *(buf + i) ^= ((unsigned char*)masking_key_x3)[ i % 4 ];
+             *(buf + i) ^= ((unsigned char*)masking_key_x3)[ (i + key_offset_) % 4 ];
 
     } else
         for (; i < end; ++i)
-             *(buf + i) ^= ((unsigned char*)masking_key_x3)[i % 4];
+             *(buf + i) ^= ((unsigned char*)masking_key_x3)[ (i + key_offset_) % 4];
 }
