@@ -1,4 +1,4 @@
-all: hpws test test_client
+all: hpws test 
 
 hpws: hpws.c
 	gcc hpws.c -o hpws -g -lcrypto -lssl

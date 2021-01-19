@@ -85,7 +85,6 @@ int example_server() {
         while (1) {
             auto accept_result = std::get<hpws::server>(server).accept();
 
-            fprintf(stderr, "HERE1\n");
             if (std::holds_alternative<hpws::client>(accept_result)) {
                 fprintf(stderr, "[TEST.CPP] a client connected\n");
             } else {
@@ -108,10 +107,10 @@ int example_server() {
                 std::string_view s = std::get<std::string_view>(read_result);
                 
                 //printf("got message from hpws: `%.*s`\n", s.size(), s.data());
-                fprintf(stderr, "[TEST.CPP] %.*s", (int)s.size(), s.data());
+//                fprintf(stderr, "[TEST.CPP] %.*s", (int)s.size(), s.data());
                 fprintf(stderr, "[TEST.CPP] got message size: %d\n", (int)s.size());
                 fprintf(stderr, "[TEST.CPP] contained: `");
-                for (int i = 0; i < s.size(); ++i)
+                for (int i = 0; i < 5; ++i)
                     putc(s[i], stderr);
                 fprintf(stderr,"`\n");           
      
