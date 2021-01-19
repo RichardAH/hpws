@@ -31,7 +31,7 @@
 **  Config
 ** --------------------------------------------------------------------------------------------------------------------
 */
-#define DEBUG 1
+#define DEBUG 0
 #define VERBOSE_DEBUG 0
 #define SSL_BUFFER_LENGTH 4096
 #define POLL_TIMEOUT 500 /* ms */
