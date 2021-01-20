@@ -1,5 +1,7 @@
 hpws
 example
 echo-server
+echo-server.log
 cert.pem
 key.pem
+reports
