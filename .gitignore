@@ -1,4 +1,5 @@
 hpws
-test
+example
+echo-server
 cert.pem
 key.pem
