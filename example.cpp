@@ -10,7 +10,7 @@
     {\
         if (std::holds_alternative<hpws::error>(obj)) {\
             hpws::error e = std::get<hpws::error>(obj);\
-            fprintf(stderr, "[TEST.CPP] error code: %d -- error msg: %.*s\n",\
+            fprintf(stderr, "[EXAMPLE.CPP] error code: %d -- error msg: %.*s\n",\
                     e.first, (int)(e.second.size()), e.second.data());\
         } else printf("asked to print an error but the object was not an error object\n");\
     }
@@ -34,7 +34,7 @@ int example_client() {
     auto accept_result = hpws::client::connect ( "hpws", 16*1024*1024, "localhost", 8080, "/", {} );
     
     if (std::holds_alternative<hpws::client>(accept_result)) {
-        printf("[TEST.CPP] a client connected\n");
+        printf("[EXAMPLE.CPP] a client connected\n");
     } else {
         PRINT_HPWS_ERROR(accept_result);
         return 1;
@@ -44,7 +44,7 @@ int example_client() {
 
     {
         int msgcounter = 0;
-        fprintf(stderr, "[TEST.CPP] sending message\n");
+        fprintf(stderr, "[EXAMPLE.CPP] sending message\n");
         //client.write("a message from the client\n");
         
         for(;;) {
@@ -57,8 +57,8 @@ int example_client() {
 
             std::string_view s = std::get<std::string_view>(read_result);
             
-            fprintf(stderr, "[TEST.CPP] got message from hpws: `%.*s`\n", (int)s.size(), s.data());
-            fprintf(stderr, "[TEST.CPP] buf contained: `");
+            fprintf(stderr, "[EXAMPLE.CPP] got message from hpws: `%.*s`\n", (int)s.size(), s.data());
+            fprintf(stderr, "[EXAMPLE.CPP] buf contained: `");
             for (int i = 0; i < s.size(); ++i)
                putc(s[i], stderr);
             fprintf(stderr,"`\n");           
@@ -76,13 +76,13 @@ int example_server() {
     auto server = hpws::server::create ( "hpws", 16*1024*1024, 8080, 512, 2, "cert.pem", "key.pem", {} );
 
     if ( std::holds_alternative<hpws::server>(server) ) {
-        fprintf(stderr, "[TEST.CPP] we got a server\n");
+        fprintf(stderr, "[EXAMPLE.CPP] we got a server\n");
 
         while (1) {
             auto accept_result = std::get<hpws::server>(server).accept();
 
             if (std::holds_alternative<hpws::client>(accept_result)) {
-                fprintf(stderr, "[TEST.CPP] a client connected\n");
+                fprintf(stderr, "[EXAMPLE.CPP] a client connected\n");
             } else {
                 PRINT_HPWS_ERROR(accept_result);
                 continue;
@@ -103,13 +103,13 @@ int example_server() {
                 std::string_view s = std::get<std::string_view>(read_result);
                 
                 //printf("got message from hpws: `%.*s`\n", s.size(), s.data());
-//                fprintf(stderr, "[TEST.CPP] %.*s", (int)s.size(), s.data());
-                fprintf(stderr, "[TEST.CPP] got message size: %d\n", (int)s.size());
+//                fprintf(stderr, "[EXAMPLE.CPP] %.*s", (int)s.size(), s.data());
+                fprintf(stderr, "[EXAMPLE.CPP] got message size: %d\n", (int)s.size());
                 if (s.size() <= 40)
-                    fprintf(stderr, "[TEST.CPP] contained: `%.*s`\n", (int)s.size(), s.data()); 
+                    fprintf(stderr, "[EXAMPLE.CPP] contained: `%.*s`\n", (int)s.size(), s.data()); 
                 else
                 {
-                    fprintf(stderr, "[TEST.CPP] contained: `");
+                    fprintf(stderr, "[EXAMPLE.CPP] contained: `");
                     for (int i = 0; i < 20; ++i)
                         putc(s[i], stderr);
                     fprintf(stderr,"`\n");
@@ -128,10 +128,10 @@ int example_server() {
         }
 
     } else if ( std::holds_alternative<hpws::error>(server) )  {
-        fprintf(stderr, "[TEST.CPP] we got an error\n");
+        fprintf(stderr, "[EXAMPLE.CPP] we got an error\n");
         PRINT_HPWS_ERROR(server);
     } else {
-        fprintf(stderr, "[TEST.CPP] we got a donkey\n");
+        fprintf(stderr, "[EXAMPLE.CPP] we got a donkey\n");
     }
 
     return 0;
