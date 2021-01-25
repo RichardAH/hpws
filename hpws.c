@@ -1247,6 +1247,9 @@ int main(int argc, char **argv)
                                 break;
                             case 8: // close frame
                             {
+                                if (!ws_fin)
+                                    WS_SEND_CLOSE_FRAME(1002, "Control frames may not be fragmented");
+
                                 WS_AT_LEAST(ws_preliminary_size, ws_header_bytes_read,
                                             ws_wait_for_bytes);
                                 ws_received_close_frame = 1;
@@ -1256,6 +1259,9 @@ int main(int argc, char **argv)
                             case 10: // pong frame
                             case 9: // ping frame
                             {
+                                if (!ws_fin)
+                                    WS_SEND_CLOSE_FRAME(1002, "Control frames may not be fragmented");
+
                                 if (ws_preliminary_size > 125)
                                    WS_SEND_CLOSE_FRAME(1002, "Control frames may only have up to 125 bytes payloads");
                                 break;
