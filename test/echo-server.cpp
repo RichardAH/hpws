@@ -33,40 +33,47 @@ int echo_server()
     {
         fprintf(stderr, "[echosvr] hpws echo server started\n");
 
+        int number_of_accepts = 0;
+        int number_of_errors = 0;
         while (1)
         {
             auto accept_result = std::get<hpws::server>(server).accept();
+            number_of_accepts++;
 
+            fprintf(stderr, "[echosvr] Accepts: %d Errors %d\n", number_of_accepts, number_of_errors);
             if (std::holds_alternative<hpws::client>(accept_result))
             {
                 fprintf(stderr, "[echosvr] a client connected\n");
             }
             else
             {
+                number_of_errors++;
                 PRINT_HPWS_ERROR(accept_result);
                 continue;
             }
-
-            auto client = std::get<hpws::client>(std::move(accept_result));
-
-            for (;;)
+            
+            ([](hpws::client client)
             {
-                auto read_result = client.read();
-                if (std::holds_alternative<hpws::error>(read_result))
+
+                for (;;)
                 {
-                    fprintf(stderr, "[echosvr] accept loop error\n");
-                    PRINT_HPWS_ERROR(read_result);
-                    break;
+                    auto read_result = client.read();
+                    if (std::holds_alternative<hpws::error>(read_result))
+                    {
+                        fprintf(stderr, "[echosvr] read loop error\n");
+                        PRINT_HPWS_ERROR(read_result);
+                        return;    
+                    }
+
+                    auto buffer = std::get<std::string_view>(read_result);
+                    const std::string in_msg(buffer);
+                    fprintf(stderr, "[echosvr] got message size: %d\n", (int)in_msg.size());
+                    client.ack(buffer);
+
+                    // Reply with the same message we got.
+                    client.write(in_msg);
                 }
-
-                auto buffer = std::get<std::string_view>(read_result);
-                const std::string in_msg(buffer);
-                fprintf(stderr, "[echosvr] got message size: %d\n", (int)in_msg.size());
-                client.ack(buffer);
-
-                // Reply with the same message we got.
-                client.write(in_msg);
-            }
+            })(std::get<hpws::client>(std::move(accept_result)));
         }
     }
     else if (std::holds_alternative<hpws::error>(server))

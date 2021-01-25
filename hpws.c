@@ -1589,15 +1589,16 @@ int main(int argc, char **argv)
     internal_error:;
 
 
-    if (DEBUG)
-        fprintf(stderr, "[HPWS.C] client finished %d\n", getpid());
-
-    close(client_fd);
-    close(control_fd[0]);
-    close(control_fd[1]);
     for (int i = 0; i < 4; ++i)
-        if (ws_buffer_fd[i] > -1)
+    {
+        if (ws_buffer_fd[i] >= 0)
+        {
+            if (DEBUG)
+                fprintf(stderr, "[HPWS.C] closed buffer [%lu]\n", ws_buffer_fd[i]);
             close(ws_buffer_fd[i]);
+        }
+    }
+
     EVP_cleanup();
     SSL_free(ssl);
     free(ssl_write_buf);
@@ -1605,6 +1606,20 @@ int main(int argc, char **argv)
 
     if (urand_fd > -1)
         close(urand_fd);
+
+    if (DEBUG)
+    fprintf(stderr, "[HPWS.C] Dead stage 1\n");
+    close(client_fd);
+    if (DEBUG)
+    fprintf(stderr, "[HPWS.C] Dead stage 2\n");
+    close(control_fd[0]);
+    if (DEBUG)
+    fprintf(stderr, "[HPWS.C] Dead stage 3\n");
+    close(control_fd[1]);
+    if (DEBUG)
+    fprintf(stderr, "[HPWS.C] Dead stage 4\n");
+    if (DEBUG)
+        fprintf(stderr, "[HPWS.C] client finished %d\n", getpid());
 
     return 0;
 }

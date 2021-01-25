@@ -47,7 +47,7 @@ namespace hpws
 // used when waiting for messages that should already be on the pipe
 #define HPWS_SMALL_TIMEOUT 10
 // used when waiting for server process to spawn
-#define HPWS_LONG_TIMEOUT 2500
+#define HPWS_LONG_TIMEOUT 50
 
     typedef union
     {
@@ -589,6 +589,11 @@ namespace hpws
 
         std::variant<client, error> accept(const bool no_block = false)
         {
+
+            static int calls = 0;
+            ++calls;
+            fprintf(stderr, "[HPWS.HPP] Accept[0] called %d\n", calls);
+
 #define HPWS_ACCEPT_ERROR(code, msg)                       \
     {                                                      \
         accept_cleanup(mapping, child_fd, buffer_fd, pid); \
@@ -601,6 +606,7 @@ namespace hpws
             // must not use pid_t here since we transfer across IPC channel as a uint32.
             uint32_t pid = 0;
 
+            fprintf(stderr, "[HPWS.HPP] Accept[1] called %d\n", calls);
             {
                 struct msghdr child_msg = {0};
                 memset(&child_msg, 0, sizeof(child_msg));
@@ -608,13 +614,15 @@ namespace hpws
                 child_msg.msg_control = cmsgbuf;
                 child_msg.msg_controllen = sizeof(cmsgbuf);
 
+                fprintf(stderr, "[HPWS.HPP] Accept[2] called %d\n", calls);
+
                 // If no-block is specified, we first check any bytes available on control fd
                 // before attempting to do a blocking a read.
                 if (no_block)
                 {
                     struct pollfd master_pfd;
                     master_pfd.fd = this->master_control_fd_;
-                    master_pfd.events = POLLIN;
+                    master_pfd.events = POLLERR | POLLHUP | POLLNVAL | POLLIN;
                     const int master_poll_result = poll(&master_pfd, 1, HPWS_SMALL_TIMEOUT);
 
                     if (master_poll_result == -1) // 1 ms timeout
@@ -623,6 +631,8 @@ namespace hpws
                     if (master_poll_result == 0) // No data available
                         HPWS_ACCEPT_ERROR(199, "no new client available");
                 }
+
+                fprintf(stderr, "[HPWS.HPP] Accept[3] called %d\n", calls);
 
                 int bytes_read =
                     recvmsg(this->master_control_fd_, &child_msg, 0);
@@ -635,15 +645,21 @@ namespace hpws
                 if (HPWS_DEBUG)
                     fprintf(stderr, "[HPWS.HPP] On accept received SCM: child_fd[0] = %d, child_fd[1] = %d\n",
                             child_fd[0], child_fd[1]);
+                
+                fprintf(stderr, "[HPWS.HPP] Accept[4] called %d\n", calls);
             }
 
             // read info from child control line with a timeout
             struct pollfd pfd;
             int ret;
 
+            fprintf(stderr, "[HPWS.HPP] Accept[5] called %d\n", calls);
+
             pfd.fd = child_fd[0]; // expect all setup messages on the hpws->hpcore controlfd (0)
             pfd.events = POLLIN;
             ret = poll(&pfd, 1, HPWS_SMALL_TIMEOUT); // 1 ms timeout
+            
+            fprintf(stderr, "[HPWS.HPP] Accept[6] called %d\n", calls);
 
             // timeout or error
             if (ret < 1)
@@ -653,10 +669,14 @@ namespace hpws
             if (recv(child_fd[0], (unsigned char *)(&pid), sizeof(pid), 0) < sizeof(pid))
                 HPWS_ACCEPT_ERROR(212, "did not receive expected 4 byte pid of child process on accept");
 
+            fprintf(stderr, "[HPWS.HPP] Accept[7] called %d\n", calls);
+
             // second thing we'll receive is IP address structure of the client
             addr_t buf;
             int bytes_read =
                 recv(child_fd[0], (unsigned char *)(&buf), sizeof(buf), 0);
+
+            fprintf(stderr, "[HPWS.HPP] Accept[8] called %d\n", calls);
 
             if (bytes_read < sizeof(buf))
                 HPWS_ACCEPT_ERROR(202, "received message on master control line was not sizeof(sockaddr_in6)");
@@ -669,12 +689,17 @@ namespace hpws
                 child_msg.msg_control = cmsgbuf;
                 child_msg.msg_controllen = sizeof(cmsgbuf);
 
+                fprintf(stderr, "[HPWS.HPP] Accept[9] called %d\n", calls);
+
                 int bytes_read =
                     recvmsg(child_fd[0], &child_msg, 0);
                 struct cmsghdr *cmsg = CMSG_FIRSTHDR(&child_msg);
                 if (cmsg == NULL || cmsg->cmsg_type != SCM_RIGHTS)
                     HPWS_ACCEPT_ERROR(203, "non-scm_rights message sent on accept child control line");
                 memcpy(&buffer_fd, CMSG_DATA(cmsg), sizeof(buffer_fd));
+                
+                fprintf(stderr, "[HPWS.HPP] Accept[10] called %d\n", calls);
+
                 for (int i = 0; i < 4; ++i)
                 {
                     //fprintf(stderr, "scm passed buffer_fd[%d] = %d\n", i, buffer_fd[i]);
@@ -685,6 +710,7 @@ namespace hpws
                     if (mapping[i] == MAP_FAILED)
                         HPWS_ACCEPT_ERROR(204, "could not mmap scm_rights passed buffer fd");
                 }
+                fprintf(stderr, "[HPWS.HPP] Accept[11] called %d\n", calls);
             }
             {
                 struct pollfd pfd;
@@ -695,10 +721,17 @@ namespace hpws
                     if (HPWS_DEBUG)
                         fprintf(stderr, "[HPWS.HPP] waiting for 'r' on child_fd[%d]=%d accept\n", i, child_fd[i]);
                     pfd.fd = child_fd[i];
-                    pfd.events = POLLIN;
+                    pfd.events =  POLLERR | POLLHUP | POLLNVAL | POLLIN;
+                    
+                    fprintf(stderr, "[HPWS.HPP] Accept[12] called %d\n", calls);
+
                     // now we wait for a 'r' ready message or for the socket/client to die
                     ret = poll(&pfd, 1, HPWS_LONG_TIMEOUT); // default= 1500 ms timeout
 
+                    if (!(pfd.revents & POLLIN))
+                        HPWS_ACCEPT_ERROR(5, "could not read from client_fd");
+
+                    fprintf(stderr, "[HPWS.HPP] Accept[12a] called %d - ret %d\n", calls, ret);
                     char rbuf[2];
                     bytes_read = recv(child_fd[i], rbuf, sizeof(rbuf), 0);
                     if (bytes_read < 1)
@@ -713,6 +746,7 @@ namespace hpws
                     if (HPWS_DEBUG)
                         fprintf(stderr, "[HPWS.HPP] 'r%c' received on child_fd[%d]=%d\n", rbuf[1], i, child_fd[i]);
                 }
+                fprintf(stderr, "[HPWS.HPP] Accept[13] called %d\n", calls);
             }
 
             return client{
