@@ -924,6 +924,9 @@ int main(int argc, char **argv)
             if (!SSL_is_init_finished(ssl))
                 goto skip_ws;
 
+            if (ws_sent_close_frame && ws_received_close_frame)
+                goto skip_ws;
+
             // --------------------------------------------------------------------------------------------------------
             // incoming websocket data
             // --------------------------------------------------------------------------------------------------------
@@ -963,6 +966,7 @@ int main(int argc, char **argv)
                             memcpy(buf + 4, reason_string, (size_t)buf[1]-2);\
                         SSL_ENQUEUE(buf, (size_t)buf[1]);\
                         ws_sent_close_frame = reason_code;\
+                        goto ws_graceful_close;\
                     }\
                 }
 
@@ -1242,39 +1246,25 @@ int main(int argc, char **argv)
                             case 2: // binary frame
                                 break;
                             case 8: // close frame
-                                {
-                                    WS_AT_LEAST(ws_preliminary_size, ws_header_bytes_read,
-                                                ws_wait_for_bytes);
-                                    ws_received_close_frame = 1;
-                                    WS_SEND_CLOSE_FRAME(1000, "Bye!");
-                                    goto ws_graceful_close;
-                                    //GOTO_ERROR("ws closing due to close frame", ws_graceful_close);
-                                }
+                            {
+                                WS_AT_LEAST(ws_preliminary_size, ws_header_bytes_read,
+                                            ws_wait_for_bytes);
+                                ws_received_close_frame = 1;
+                                WS_SEND_CLOSE_FRAME(1000, "Bye!");
+                                continue;
+                            }
+                            case 10: // pong frame
                             case 9: // ping frame
-                            case 10:  // pong frame, discard
-                                {
-                                    // modify the opcode and send it back
-                                    WS_AT_LEAST(ws_preliminary_size, ws_header_bytes_read,
-                                                ws_wait_for_bytes);
-                                    if (DEBUG)
-                                        fprintf(stderr, "[HPWS.C PID+%08X] ping/pong frame\n", my_pid);
-                                    if (ws_opcode == 9) {
-                                        ws_buf_header[0] = 0b10001010U; // its a pong!
-                                        if (!ws_sent_close_frame)
-                                        {
-                                            SSL_ENQUEUE(ws_buf_header, ws_preliminary_size);
-                                            SSL_FLUSH_OUT();
-                                        }
-                                    }
-                                    ws_state  = 1;
-                                    ws_wait_for_bytes = 2;
-                                    continue;
-                                }
+                            {
+                                if (ws_preliminary_size > 125)
+                                   WS_SEND_CLOSE_FRAME(1002, "Control frames may only have up to 125 bytes payloads");
+                                break;
+                            }
                             default:
-                                {
-                                    WS_SEND_CLOSE_FRAME(1002, "Invalid opcode");
-                                    GOTO_ERROR("ws invalid opcode", ws_protocol_error);
-                                }
+                            {
+                                WS_SEND_CLOSE_FRAME(1002, "Invalid opcode");
+                                GOTO_ERROR("ws invalid opcode", ws_protocol_error);
+                            }
                         }
                         ws_state = 2;
                         SSL_FLUSH_OUT();
@@ -1524,14 +1514,30 @@ int main(int argc, char **argv)
                                     ws_multi_frame_bytes + ws_payload_bytes_expected - 20)));
                         }
 
-                        if (ws_fin)
+                        uint32_t len = (uint32_t)(ws_payload_upto + ws_multi_frame_bytes);
+                        if (ws_opcode == 0xAU) // pong frame
+                        {
+                            ws_multi_frame_bytes = 0;
+                        }
+                        else if (ws_opcode == 0x9U) // ping frame
+                        {
+                            if (DEBUG)
+                                fprintf(stderr, "[HPWS.C PID+%08X] sending stage 4 pong frame\n", my_pid);
+                            unsigned char buf[2];
+                            buf[0] = 0b10001010U; // its a pong!
+                            buf[1] = len;
+                            SSL_ENQUEUE(buf, 2);
+                            SSL_ENQUEUE(ws_buf_decode, len);
+                            SSL_FLUSH_OUT();
+                            ws_multi_frame_bytes = 0;
+                        } 
+                        else if (ws_fin)
                         {
                             // final frame in the fragment so we need to send a control line msg and swap buffers
 
                             int sending_buf = ( ws_buf_decode == ws_buffer[0] ? 0 : 1 );
 
 
-                            uint32_t len = (uint32_t)(ws_payload_upto + ws_multi_frame_bytes);
                             if (DEBUG)
                                 fprintf(stderr, "[HPWS.C PID+%08X] sending o message: buf = %d, len = %lu\n", my_pid,
                                         sending_buf, len);
@@ -1573,7 +1579,7 @@ int main(int argc, char **argv)
 
             goto skip_ws_;
             skip_ws:;
-
+                
             if (DEBUG && VERBOSE_DEBUG)
                 fprintf(stderr, "[HPWS.C PID+%08X] <==> jumped to skip_ws\n", my_pid);
             skip_ws_:;
@@ -1607,6 +1613,9 @@ int main(int argc, char **argv)
               break;
         }
 
+        if (ws_sent_close_frame && ws_received_close_frame && ssl_encrypt_len == 0 && ssl_write_len == 0)
+            goto ws_graceful_close;
+
         if (DEBUG && VERBOSE_DEBUG)
             fprintf(stderr, "[HPWS.C PID+%08X] end of event loop, back to start\n", my_pid);
     }
@@ -1618,46 +1627,18 @@ int main(int argc, char **argv)
     
     ws_graceful_close:;
     {
-        fprintf(stderr, "[HPWS.C PID+%08X] graceful close begin\n", my_pid);
-        SSL_FLUSH_OUT(); 
-        while (ssl_write_len > 0 && !read(client_fd, ssl_buf, 0))
-        {
-            fdset[0].fd = client_fd;
-            fdset[0].events &= ~POLLOUT;
-
-            if (ssl_write_len > 0)
-                fdset[0].events |=  POLLOUT;
-
-            if (DEBUG && VERBOSE_DEBUG)
-                fprintf(stderr, "[HPWS.C PID+%08X] graceful final polling\n", my_pid);
-
-            int poll_result = poll(&fdset[0], 1, POLL_TIMEOUT);
-
-            if (fdset[0].revents & POLLOUT && ssl_write_len)
-            {
-                bytes_written = write(client_fd, ssl_write_buf, ssl_write_len);
-                if (DEBUG)
-                    fprintf(stderr, "[HPWS.C PID+%08X] graceful RAW outgoing data %ld\n", my_pid, bytes_written);
-                if (bytes_written <= 0)
-                    GOTO_ERROR("unable to write encrypted bytes to socket", ssl_error);
-                if (bytes_written < ssl_write_len)
-                    memmove(ssl_write_buf, ssl_write_buf + bytes_written, ssl_write_len - bytes_written);
-                ssl_write_len -= bytes_written;
-                ssl_write_buf = (char*)realloc(ssl_write_buf, ssl_write_len);
-                if (DEBUG)
-                    fprintf(stderr,
-                        "[HPWS.C PID+%08X] graceful RAW bytes remaining to write: %d\n", my_pid, ssl_write_len);
-            }
-        }
+        if (DEBUG)
+            fprintf(stderr, "[HPWS.C PID+%08X] graceful close 1\n", my_pid);
         struct linger sl;
         sl.l_onoff = 1;		/* non-zero value enables linger option in kernel */
         sl.l_linger = 1;	/* timeout interval in seconds */
-        setsockopt(client_fd, SOL_SOCKET, SO_LINGER, &sl, sizeof(sl));
         shutdown(client_fd, SHUT_RDWR);
-        sleep(1);
-        // send a 'c' message to the control line
-        char buf[1] = {'c'};
-        send(control_fd[0], buf, 1, 0); // don't care if it doesnt receive it
+        
+        if (DEBUG)
+            fprintf(stderr, "[HPWS.C PID+%08X] graceful close 2\n", my_pid);
+        if (DEBUG)
+            fprintf(stderr, "[HPWS.C PID+%08X] graceful close 3\n", my_pid);
+
     }
 
     parent_exit:;
@@ -1697,6 +1678,11 @@ int main(int argc, char **argv)
     if (DEBUG)
         fprintf(stderr, "[HPWS.C PID+%08X] Dead stage 1\n", my_pid);
     close(client_fd);
+
+    // send a 'c' message to the control line
+//    char buf[1] = {'c'};
+//    send(control_fd[0], buf, 1, 0); // don't care if it doesnt receive it
+
     if (DEBUG)
         fprintf(stderr, "[HPWS.C PID+%08X] Dead stage 2\n", my_pid);
     close(control_fd[0]);
