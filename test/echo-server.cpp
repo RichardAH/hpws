@@ -59,9 +59,10 @@ int echo_server()
                     break;
                 }
 
-                const std::string in_msg(std::get<std::string_view>(read_result));
+                auto buffer = std::get<std::string_view>(read_result);
+                const std::string in_msg(buffer);
                 fprintf(stderr, "[echosvr] got message size: %d\n", (int)in_msg.size());
-                client.ack(in_msg);
+                client.ack(buffer);
 
                 // Reply with the same message we got.
                 client.write(in_msg);
