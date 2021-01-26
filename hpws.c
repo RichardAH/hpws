@@ -93,6 +93,51 @@ pid_t my_pid = -1; // set at various points throughout the program, always the c
 unsigned char * base64_encode( unsigned char* src, size_t len, unsigned char* out, size_t out_len );
 void block_xor(unsigned char* buf, uint64_t start, uint64_t end, unsigned char* masking_key_x3, uint8_t key_offset_);
 
+
+#define UTF8_ACCEPT 0
+#define UTF8_REJECT 1
+
+/** 
+    UTF8 validation
+    // Copyright (c) 2008-2009 Bjoern Hoehrmann <bjoern@hoehrmann.de>
+    // See http://bjoern.hoehrmann.de/utf-8/decoder/dfa/ for details.
+**/
+static const uint8_t utf8d[] = {
+  0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0, // 00..1f
+  0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0, // 20..3f
+  0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0, // 40..5f
+  0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0, // 60..7f
+  1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,9,9,9,9,9,9,9,9,9,9,9,9,9,9,9,9, // 80..9f
+  7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7, // a0..bf
+  8,8,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2, // c0..df
+  0xa,0x3,0x3,0x3,0x3,0x3,0x3,0x3,0x3,0x3,0x3,0x3,0x3,0x4,0x3,0x3, // e0..ef
+  0xb,0x6,0x6,0x6,0x5,0x8,0x8,0x8,0x8,0x8,0x8,0x8,0x8,0x8,0x8,0x8, // f0..ff
+  0x0,0x1,0x2,0x3,0x5,0x8,0x7,0x1,0x1,0x1,0x4,0x6,0x1,0x1,0x1,0x1, // s0..s0
+  1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,0,1,1,1,1,1,0,1,0,1,1,1,1,1,1, // s1..s2
+  1,2,1,1,1,1,1,2,1,2,1,1,1,1,1,1,1,1,1,1,1,1,1,2,1,1,1,1,1,1,1,1, // s3..s4
+  1,2,1,1,1,1,1,1,1,2,1,1,1,1,1,1,1,1,1,1,1,1,1,3,1,3,1,1,1,1,1,1, // s5..s6
+  1,3,1,1,1,1,1,3,1,3,1,1,1,1,1,1,1,3,1,1,1,1,1,1,1,1,1,1,1,1,1,1, // s7..s8
+};
+
+
+uint32_t validate_utf8(uint32_t *state, char *str, size_t len)
+{
+   size_t i;
+   uint32_t type;
+    for (i = 0; i < len; i++)
+    {
+        type = utf8d[(uint8_t)str[i]];
+        *state = utf8d[256 + (*state) * 16 + type];
+        if (*state == UTF8_REJECT)
+            break;
+    }
+    return *state;
+}
+/**
+    UTF8 validation ends
+**/
+
+
 int main(int argc, char **argv)
 {
     // No zombies. We simply let our direct children vanish.
@@ -144,6 +189,7 @@ int main(int argc, char **argv)
     int64_t ws_payload_next = 0;
     int64_t ws_buffer_length = (16*1024*1024);
     unsigned char ws_fin = 1, ws_last_fin = 0, ws_opcode = 0, ws_last_opcode = 0;
+    uint32_t ws_utf8_state = 0;
     int64_t ws_state = 0, ws_wait_for_bytes = 0,
         ws_sent_close_frame = 0, ws_received_close_frame = 0,
         ws_payload_upto = 0, ws_preliminary_size = 0, ws_read_result = 0,
@@ -984,9 +1030,9 @@ int main(int argc, char **argv)
 
                 #define WS_PROTOCOL_ERROR( msg )\
                 {\
-                    WS_SEND_CLOSE_FRAME( 1002, msg );\
                     fprintf(stderr, "[HPWS.C PID+%08X] WS_PROTOCOL_ERROR `%s`\n", my_pid, msg);\
-                    GOTO_ERROR("ws protocol error", ws_protocol_error);\
+                    WS_SEND_CLOSE_FRAME( 1002, msg );\
+                    GOTO_ERROR("ws protocol error", ws_graceful_close);\ 
                 }
 
                 // websocket frame decoding is a state machine running inside the ssl decoding state machine
@@ -1209,13 +1255,6 @@ int main(int argc, char **argv)
                         ws_fin = ((ws_buf_header[0] >> 7) & 0x1);
 
                         
-
-                        if (ws_opcode == 0x1U)
-                            ws_text_mode = 1;
-
-                        //if (!ws_opcode && ws_fin)
-                        //    WS_PROTOCOL_ERROR("fin bit set on opcode 0");
-
                         // check mask flag is present
                         ws_masking_flag = (ws_buf_header[1] >> 7);
 
@@ -1248,6 +1287,7 @@ int main(int argc, char **argv)
                         switch (ws_opcode) {
                             case 8: // close frame
                             {
+                                fprintf(stderr, "[HPWS.C PID+%08X] <CLOSE FRAME>\n", my_pid);
                                 if (!ws_fin)
                                     WS_SEND_CLOSE_FRAME(1002, "Control frames may not be fragmented");
 
@@ -1260,6 +1300,8 @@ int main(int argc, char **argv)
                             case 10: // pong frame
                             case 9: // ping frame
                             {
+                                fprintf(stderr, "[HPWS.C PID+%08X] <%s FRAME>\n", my_pid, 
+                                    (ws_opcode == 9 ? "PING" : "PONG"));
                                 if (!ws_fin)
                                     WS_SEND_CLOSE_FRAME(1002, "Control frames may not be fragmented");
 
@@ -1269,19 +1311,32 @@ int main(int argc, char **argv)
                             }
                             case 0: // continuation frame
                             {
+                                fprintf(stderr, "[HPWS.C PID+%08X] <%s-CONT FRAME>\n", my_pid, 
+                                    (ws_text_mode ? "TEXT" : "BINARY"));
                                 if (ws_last_fin)
                                     WS_SEND_CLOSE_FRAME(1002, "Cannot send continuation frame following FIN frame.");
                                 break;
                             }
                             case 1: // text frame
+                            {
+                                fprintf(stderr, "[HPWS.C PID+%08X] <TEXT FRAME>\n", my_pid);
+                                ws_text_mode = 1;
+                                ws_utf8_state = 0;
+                                if (!ws_last_fin)
+                                    WS_SEND_CLOSE_FRAME(1002, "Cannot send new text/bin frame unless prev was FIN");
+                                break;
+                            }
                             case 2: // binary frame
                             {
+                                fprintf(stderr, "[HPWS.C PID+%08X] <BINARY FRAME>\n", my_pid);
+                                ws_text_mode = 0;
                                 if (!ws_last_fin)
                                     WS_SEND_CLOSE_FRAME(1002, "Cannot send new text/bin frame unless prev was FIN");
                                 break;
                             }
                             default:
                             {
+                                fprintf(stderr, "[HPWS.C PID+%08X] <INVALID FRAME>\n", my_pid);
                                 WS_SEND_CLOSE_FRAME(1002, "Invalid opcode");
                                 GOTO_ERROR("ws invalid opcode", ws_protocol_error);
                             }
@@ -1492,6 +1547,24 @@ int main(int argc, char **argv)
                                 ws_buf_decode[ws_multi_frame_bytes + ws_payload_upto + 3] & 0xFFU,
                                 ws_buf_decode[ws_multi_frame_bytes + ws_payload_upto + 4] & 0xFFU,
                                 ws_buf_decode[ws_multi_frame_bytes + ws_payload_upto + 5] & 0xFFU);
+
+
+                        if (ws_text_mode)
+                        {
+                            if (DEBUG)
+                                fprintf(stderr, "[HPWS.C PID+%08X] attempting text mode validation on `%.*s`\n",
+                                    my_pid, ws_read_result, ws_buf_decode + ws_multi_frame_bytes + ws_payload_upto);
+                            ws_utf8_state = validate_utf8(&ws_utf8_state, 
+                                ws_buf_decode + ws_multi_frame_bytes + ws_payload_upto, ws_read_result);
+                            if (ws_utf8_state == UTF8_REJECT ||
+                                (ws_payload_bytes_remaining == 0 && ws_fin == 1 && ws_utf8_state != UTF8_ACCEPT))
+                            {
+                                if (DEBUG)
+                                    fprintf(stderr, "[HPWS.C PID+%08X] invalid utf8 detected during text mode\n",
+                                        my_pid);
+                                WS_SEND_CLOSE_FRAME(1002, "Invalid UTF8 sent in text/text-cont frame");
+                            }
+                        }
 
                         ws_back_read = 0;
 
