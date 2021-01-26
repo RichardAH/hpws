@@ -18,7 +18,7 @@ else
 fi
 
 # Run the autobahn test server (runs in background with -d flag).
-docker run -d --rm -v "${PWD}/test/autobahn:/autobahn" --name hpws-autobahn-client-tester -p 8080:443 \
+docker run -d --rm -v "${PWD}/test/autobahn:/autobahn" --name hpws-autobahn-client-tester -p 9001:443 \
     crossbario/autobahn-testsuite /usr/local/bin/wstest --mode fuzzingserver --spec /autobahn/client-tests.json --webport 0
 
 sigint_handler()

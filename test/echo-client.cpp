@@ -33,7 +33,7 @@ int main(int argc, char **argv)
 int echo_client(const uint32_t caseid)
 {
     const std::string path = "/runCase?case=" + std::to_string(caseid) + "&agent=hpwsclient";
-    auto accept_result = hpws::client::connect("hpws", 16 * 1024 * 1024, "localhost", 8080, path, {});
+    auto accept_result = hpws::client::connect("hpws", 16 * 1024 * 1024, "localhost", 9001, path, {});
 
     if (std::holds_alternative<hpws::client>(accept_result))
     {
