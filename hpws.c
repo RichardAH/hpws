@@ -143,7 +143,8 @@ int main(int argc, char **argv)
     int64_t ws_payload_bytes_remaining = 0;
     int64_t ws_payload_next = 0;
     int64_t ws_buffer_length = (16*1024*1024);
-    int64_t ws_state = 0, ws_fin = 0, ws_opcode = 0, ws_wait_for_bytes = 0,
+    unsigned char ws_fin = 1, ws_last_fin = 0, ws_opcode = 0, ws_last_opcode = 0;
+    int64_t ws_state = 0, ws_wait_for_bytes = 0,
         ws_sent_close_frame = 0, ws_received_close_frame = 0,
         ws_payload_upto = 0, ws_preliminary_size = 0, ws_read_result = 0,
         ws_back_read = 0, ws_header_back_read = 0, ws_pending_read = 0,
@@ -335,7 +336,7 @@ int main(int argc, char **argv)
 
             if (kill (parent_pid, 0) != 0)
                 GOTO_ERROR("parent process died", parent_exit);
-            
+
             if (poll_result == 0)
                 continue;
 
@@ -366,7 +367,7 @@ int main(int argc, char **argv)
             {
                 struct msghdr msg = { 0 };
                 struct cmsghdr *cmsg;
-                int send_fd[2] = 
+                int send_fd[2] =
                     {child_control_fd[1], child_control_fd[3]} ;  /* Contains the file descriptors to pass */
                 char iobuf[1];
                 struct iovec io = {
@@ -450,7 +451,7 @@ int main(int argc, char **argv)
         control_fd[1] = arg_control_fd_2;
 
         if (DEBUG)
-            fprintf(stderr, 
+            fprintf(stderr,
                 "[HPWS.C PID+%08X] client mode control_fd hpws->hpcore is %d contol_fd hpcore->hpws is %d\n", my_pid,
                 control_fd[0], control_fd[1]);
 
@@ -1027,7 +1028,7 @@ int main(int argc, char **argv)
                             GOTO_ERROR("websocket upgrade request longer than buffer, could not connect",
                                         ws_handshake_error);
                         if (DEBUG)
-                            fprintf(stderr, 
+                            fprintf(stderr,
                                 "[HPWS.C PID+%08X] outgoing websocket upgrade request\n%s--end of request--\n",
                                 my_pid, request);
                         SSL_ENQUEUE(request, snprintf_result);
@@ -1201,9 +1202,13 @@ int main(int argc, char **argv)
                             WS_PROTOCOL_ERROR("rsv1-3 must be 0");
 
                         // parse opcode
+                        ws_last_opcode = ws_opcode;
+                        ws_opcode = ws_buf_header[0] & 0b00001111;
+                        if (ws_last_opcode <= 2)
+                            ws_last_fin = ws_fin; // ws_last_fin stores the last fin flag on a non-control frame
                         ws_fin = ((ws_buf_header[0] >> 7) & 0x1);
 
-                        ws_opcode = ws_buf_header[0] & 0b00001111;
+                        
 
                         if (ws_opcode == 0x1U)
                             ws_text_mode = 1;
@@ -1230,7 +1235,7 @@ int main(int argc, char **argv)
                                     ws_fin,  ws_preliminary_size );
 
                             fprintf(stderr,
-                                "[HPWS.C PID+%08X] raw header [%02X %02X %02X %02X %02X %02X ]: `%.*s`\n", my_pid, 
+                                "[HPWS.C PID+%08X] raw header [%02X %02X %02X %02X %02X %02X ]: `%.*s`\n", my_pid,
                                 ws_buf_header[0] & 0xFFU,
                                 ws_buf_header[1] & 0xFFU,
                                 ws_buf_header[2] & 0xFFU,
@@ -1241,10 +1246,6 @@ int main(int argc, char **argv)
                             fprintf(stderr, "[HPWS.C PID+%08X] opcode: %d\n", my_pid, ws_opcode);
                         }
                         switch (ws_opcode) {
-                            case 0: // continuation frame
-                            case 1: // text frame
-                            case 2: // binary frame
-                                break;
                             case 8: // close frame
                             {
                                 if (!ws_fin)
@@ -1264,6 +1265,19 @@ int main(int argc, char **argv)
 
                                 if (ws_preliminary_size > 125)
                                    WS_SEND_CLOSE_FRAME(1002, "Control frames may only have up to 125 bytes payloads");
+                                break;
+                            }
+                            case 0: // continuation frame
+                            {
+                                if (ws_last_fin)
+                                    WS_SEND_CLOSE_FRAME(1002, "Cannot send continuation frame following FIN frame.");
+                                break;
+                            }
+                            case 1: // text frame
+                            case 2: // binary frame
+                            {
+                                if (!ws_last_fin)
+                                    WS_SEND_CLOSE_FRAME(1002, "Cannot send new text/bin frame unless prev was FIN");
                                 break;
                             }
                             default:
@@ -1331,9 +1345,9 @@ int main(int argc, char **argv)
                             size_t copied_payload = ws_header_bytes_read - header_size;
                             if (DEBUG)
                                 fprintf(stderr,
-                                    "[HPWS.C PID+%08X] copying %d bytes of payload, ws_payload_upto %d\n", my_pid, 
+                                    "[HPWS.C PID+%08X] copying %d bytes of payload, ws_payload_upto %d\n", my_pid,
                                     copied_payload, ws_payload_upto);
-                            
+
                             memcpy( ws_buf_decode + ws_multi_frame_bytes,
                                     ws_buf_header + header_size, copied_payload );
                             ws_back_read = copied_payload;
@@ -1354,12 +1368,12 @@ int main(int argc, char **argv)
 
                         // read into decode buffer
                         int64_t buffer_bytes_left =
-                                ws_buffer_length - 
+                                ws_buffer_length -
                                 ws_payload_upto - 8 - ws_back_read - ws_multi_frame_bytes;
                         if (ws_payload_bytes_remaining > buffer_bytes_left)
                         {
                             if (DEBUG)
-                                fprintf(stderr, 
+                                fprintf(stderr,
                                     "[HPWS.C PID+%08X] ws_payload_bytes_remaining: %d\n"
                                     "[HPWS.C PID+%08X] buffer_bytes_left: %d\n"
                                     "[HPWS.C PID+%08X] ws_buffer_length: %d\n"
@@ -1378,7 +1392,7 @@ int main(int argc, char **argv)
 
                         ws_read_result =
                             SSL_read( ssl,
-                                      ws_buf_decode + ws_multi_frame_bytes + 
+                                      ws_buf_decode + ws_multi_frame_bytes +
                                       ws_payload_upto + ws_back_read,
                                       ws_payload_bytes_remaining );
 
@@ -1387,18 +1401,18 @@ int main(int argc, char **argv)
                                 goto skip_ws;
                             ws_read_result = 0;
                         }
-                        
+
                         if (DEBUG)
-                            fprintf(stderr, 
+                            fprintf(stderr,
                                 "[HPWS.C PID+%08X] buffer_bytes_left: %llu, ws_multi_frame_bytes: %llu\n"
                                 "[HPWS.C PID+%08X] ws_payload_upto: %llu, ws_back_read: %llu, ws_buffer_length: %llu"
-                                "\n", 
+                                "\n",
                                 my_pid, buffer_bytes_left, ws_multi_frame_bytes,
                                 my_pid, ws_payload_upto, ws_back_read, ws_buffer_length);
-                                        
-                        if (ws_back_read) 
+
+                        if (ws_back_read)
                             ws_read_result += ws_back_read;
-                        
+
                         if (DEBUG)
                             fprintf(stderr, "[HPWS.C PID+%08X] ws_state = 3: bytes read : %d\n== "
                                 "payload_bytes_remaining: %d\n", my_pid, ws_read_result,
@@ -1449,10 +1463,10 @@ int main(int argc, char **argv)
                                 ws_masking_key[3] & 0xFFU);
 
                         if (DEBUG)
-                            fprintf(stderr, 
+                            fprintf(stderr,
                                 "[HPWS.C PID+%08X] BEFORE DECODE ws_buf_decode[%d] = %02X %02X %02X %02X %02X %02X\n",
                                 my_pid,
-                                ws_multi_frame_bytes + ws_payload_upto, 
+                                ws_multi_frame_bytes + ws_payload_upto,
                                 ws_buf_decode[ws_multi_frame_bytes + ws_payload_upto + 0] & 0xFFU,
                                 ws_buf_decode[ws_multi_frame_bytes + ws_payload_upto + 1] & 0xFFU,
                                 ws_buf_decode[ws_multi_frame_bytes + ws_payload_upto + 2] & 0xFFU,
@@ -1462,23 +1476,23 @@ int main(int argc, char **argv)
 
                         if (ws_masking_key)
                             block_xor(ws_buf_decode,
-                            ws_multi_frame_bytes + ws_payload_upto, 
+                            ws_multi_frame_bytes + ws_payload_upto,
                             ws_multi_frame_bytes + ws_payload_next,
-                            ws_masking_key, 
+                            ws_masking_key,
                             (4 - ((ws_multi_frame_bytes) % 4)) % 4);
-                        
+
                         if (DEBUG)
                             fprintf(stderr, "[HPWS.C PID+%08X] AFTER DECODE  ws_buf_decode[%d] = "
                                 "%02X %02X %02X %02X %02X %02X\n",
                                 my_pid,
-                                ws_multi_frame_bytes + ws_payload_upto, 
+                                ws_multi_frame_bytes + ws_payload_upto,
                                 ws_buf_decode[ws_multi_frame_bytes + ws_payload_upto + 0] & 0xFFU,
                                 ws_buf_decode[ws_multi_frame_bytes + ws_payload_upto + 1] & 0xFFU,
                                 ws_buf_decode[ws_multi_frame_bytes + ws_payload_upto + 2] & 0xFFU,
                                 ws_buf_decode[ws_multi_frame_bytes + ws_payload_upto + 3] & 0xFFU,
                                 ws_buf_decode[ws_multi_frame_bytes + ws_payload_upto + 4] & 0xFFU,
                                 ws_buf_decode[ws_multi_frame_bytes + ws_payload_upto + 5] & 0xFFU);
-                        
+
                         ws_back_read = 0;
 
                         ws_payload_upto = ws_payload_next;
@@ -1523,20 +1537,21 @@ int main(int argc, char **argv)
                         uint32_t len = (uint32_t)(ws_payload_upto + ws_multi_frame_bytes);
                         if (ws_opcode == 0xAU) // pong frame
                         {
-                            ws_multi_frame_bytes = 0;
+                            // do nothing
                         }
                         else if (ws_opcode == 0x9U) // ping frame
                         {
                             if (DEBUG)
                                 fprintf(stderr, "[HPWS.C PID+%08X] sending stage 4 pong frame\n", my_pid);
+                            uint32_t len = (uint32_t)(ws_payload_upto);
                             unsigned char buf[2];
                             buf[0] = 0b10001010U; // its a pong!
                             buf[1] = len;
                             SSL_ENQUEUE(buf, 2);
-                            SSL_ENQUEUE(ws_buf_decode, len);
+                            SSL_ENQUEUE(ws_buf_decode + ws_multi_frame_bytes, len);
                             SSL_FLUSH_OUT();
-                            ws_multi_frame_bytes = 0;
-                        } 
+                            // we effectively just overwrite this payload by not changing ws_multi_frame_bytes
+                        }
                         else if (ws_fin)
                         {
                             // final frame in the fragment so we need to send a control line msg and swap buffers
@@ -1585,7 +1600,7 @@ int main(int argc, char **argv)
 
             goto skip_ws_;
             skip_ws:;
-                
+
             if (DEBUG && VERBOSE_DEBUG)
                 fprintf(stderr, "[HPWS.C PID+%08X] <==> jumped to skip_ws\n", my_pid);
             skip_ws_:;
@@ -1630,7 +1645,7 @@ int main(int argc, char **argv)
         fprintf(stderr, "[HPWS.C PID+%08X] main event loop ended\n", my_pid);
 
     goto cleanup;
-    
+
     ws_graceful_close:;
     {
         if (DEBUG)
@@ -1639,7 +1654,7 @@ int main(int argc, char **argv)
         sl.l_onoff = 1;		/* non-zero value enables linger option in kernel */
         sl.l_linger = 1;	/* timeout interval in seconds */
         shutdown(client_fd, SHUT_RDWR);
-        
+
         if (DEBUG)
             fprintf(stderr, "[HPWS.C PID+%08X] graceful close 2\n", my_pid);
         if (DEBUG)
@@ -1743,7 +1758,7 @@ unsigned char * base64_encode( unsigned char* src, size_t len, unsigned char* ou
 }
 
 
-void block_xor(unsigned char* restrict buf, uint64_t start, uint64_t end, unsigned char* masking_key_x3, 
+void block_xor(unsigned char* restrict buf, uint64_t start, uint64_t end, unsigned char* masking_key_x3,
     uint8_t key_offset_)
 {
     /*
