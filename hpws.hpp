@@ -34,7 +34,7 @@
         control_msg[5] = (unsigned char)((f >> 0) & 0xff);  \
     }
 
-#define HPWS_DEBUG 1
+#define HPWS_DEBUG 0
 
 namespace hpws
 {

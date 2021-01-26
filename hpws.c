@@ -31,8 +31,8 @@
 **  Config
 ** --------------------------------------------------------------------------------------------------------------------
 */
-#define DEBUG 1
-#define VERBOSE_DEBUG 1
+#define DEBUG 0
+#define VERBOSE_DEBUG 0
 #define SSL_BUFFER_LENGTH 4096
 #define POLL_TIMEOUT 500 /* ms */
 #define _GNU_SOURCE
@@ -1287,14 +1287,14 @@ int main(int argc, char **argv)
                         switch (ws_opcode) {
                             case 8: // close frame
                             {
+                                ws_received_close_frame = 1;
                                 fprintf(stderr, "[HPWS.C PID+%08X] <CLOSE FRAME>\n", my_pid);
                                 if (!ws_fin)
                                     WS_SEND_CLOSE_FRAME(1002, "Control frames may not be fragmented");
 
-                                WS_AT_LEAST(ws_preliminary_size, ws_header_bytes_read,
-                                            ws_wait_for_bytes);
-                                ws_received_close_frame = 1;
                                 WS_SEND_CLOSE_FRAME(1000, "Bye!");
+                                /*WS_AT_LEAST(ws_preliminary_size, ws_header_bytes_read,
+                                            ws_wait_for_bytes);*/
                                 continue;
                             }
                             case 10: // pong frame
