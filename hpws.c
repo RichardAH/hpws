@@ -1465,7 +1465,7 @@ int main(int argc, char **argv)
                             ws_multi_frame_bytes + ws_payload_upto, 
                             ws_multi_frame_bytes + ws_payload_next,
                             ws_masking_key, 
-                            0);
+                            (4 - ((ws_multi_frame_bytes) % 4)) % 4);
                         
                         if (DEBUG)
                             fprintf(stderr, "[HPWS.C PID+%08X] AFTER DECODE  ws_buf_decode[%d] = "
