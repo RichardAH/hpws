@@ -18,13 +18,19 @@ else
 fi
 
 # Run the autobahn test server (runs in background with -d flag).
-docker run -d --rm -v "${PWD}/test/autobahn:/autobahn" --name hpws-autobahn-client-tester -p 8080:8080 -p 9001:9001 \
-    crossbario/autobahn-testsuite /usr/local/bin/wstest --mode fuzzingserver --spec /autobahn/client-tests.json
+docker run -d --rm -v "${PWD}/test/autobahn:/autobahn" --name hpws-autobahn-client-tester -p 8080:443 \
+    crossbario/autobahn-testsuite /usr/local/bin/wstest --mode fuzzingserver --spec /autobahn/client-tests.json --webport 0
+
+sigint_handler()
+{
+    docker stop hpws-autobahn-client-tester
+}
+trap sigint_handler SIGINT
 
 # Run hpws echo client. (give some time for autobahn container to initialize in background)
 sleep 1
 ./echo-client
 
-docker stop hpws-autobahn-client-tester
+docker stop hpws-autobahn-client-tester >/dev/null 2>&1
 
 echo "test report generated at ${PWD}/test/autobahn/client-reports/index.html"

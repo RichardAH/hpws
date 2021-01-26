@@ -14,7 +14,7 @@
             printf("[echoclient] asked to print an error but the object was not an error object\n"); \
     }
 
-int echo_client();
+int echo_client(const uint32_t caseid);
 
 int main(int argc, char **argv)
 {
@@ -23,17 +23,21 @@ int main(int argc, char **argv)
     prctl(PR_SET_CHILD_SUBREAPER, 1);
 
     // We need to repeatedly re-connect to the test server as it will disconnect us after each test case.
-    while (echo_client() != -1)
-        ;
+    uint32_t caseid = 1;
+    while (caseid <= 519) // Can use "/getcasecount" to get configured test case count from server.
+    {
+        echo_client(caseid++);
+    }
 }
 
-int echo_client()
+int echo_client(const uint32_t caseid)
 {
-    auto accept_result = hpws::client::connect("hpws", 16 * 1024 * 1024, "localhost", 9001, "/", {});
+    const std::string path = "/runCase?case=" + std::to_string(caseid) + "&agent=hpwsclient";
+    auto accept_result = hpws::client::connect("hpws", 16 * 1024 * 1024, "localhost", 8080, path, {});
 
     if (std::holds_alternative<hpws::client>(accept_result))
     {
-        printf("[echoclient] Connected to server\n");
+        std::cout << "[echoclient] Connected to server (test case: " << caseid << ")\n";
     }
     else
     {
@@ -49,7 +53,7 @@ int echo_client()
         if (std::holds_alternative<hpws::error>(read_result))
         {
             PRINT_HPWS_ERROR(read_result);
-            return 1;
+            return -1;
         }
 
         std::string_view buffer = std::get<std::string_view>(read_result);
