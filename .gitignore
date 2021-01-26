@@ -2,6 +2,9 @@ hpws
 example
 echo-server
 echo-server.log
+echo-client
+echo-client.log
 cert.pem
 key.pem
-reports
+server-reports
+client-reports
