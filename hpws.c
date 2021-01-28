@@ -36,6 +36,7 @@
 #define SSL_BUFFER_LENGTH 4096
 #define POLL_TIMEOUT 100 /* ms */
 #define CLIENT_SHUTDOWN_CYCLES 25
+#define CLIENT_SHUTDOWN_FINAL_TIMEOUT 20000 /* microseconds */
 #define _GNU_SOURCE
 
 #include <stdio.h>
@@ -1765,11 +1766,14 @@ int main(int argc, char **argv)
 
         int bytes = 0;
         ioctl(client_fd, TIOCOUTQ, &bytes);
-        while(bytes > 0)
+        int64_t fin_timer = 0;
+        while(bytes > 0 && fin_timer < CLIENT_SHUTDOWN_FINAL_TIMEOUT)
         {
             if (DEBUG)
                 fprintf(stderr, "[HPWS.C PID+%08X] waiting for TCP to clear %d bytes\n", my_pid, bytes);
             ioctl(client_fd, TIOCOUTQ, &bytes);
+            fin_timer += 1000;
+            usleep(1000);
         }
 
         SSL_free(ssl);
