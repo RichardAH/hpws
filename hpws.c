@@ -31,10 +31,11 @@
 **  Config
 ** --------------------------------------------------------------------------------------------------------------------
 */
-#define DEBUG 0
-#define VERBOSE_DEBUG 0
+#define DEBUG 1
+#define VERBOSE_DEBUG 1
 #define SSL_BUFFER_LENGTH 4096
-#define POLL_TIMEOUT 500 /* ms */
+#define POLL_TIMEOUT 100 /* ms */
+#define CLIENT_SHUTDOWN_CYCLES 25
 #define _GNU_SOURCE
 
 #include <stdio.h>
@@ -55,6 +56,9 @@
 #include <netdb.h>
 #include <sys/ioctl.h>
 #include <sys/prctl.h>
+#include <sys/socket.h>
+#include <netinet/in.h>
+#include <netinet/tcp.h>
 #include <signal.h>
 
 pid_t parent_pid = -1; // we set this on startup
@@ -181,6 +185,7 @@ int main(int argc, char **argv)
     char ip[40]; ip[0] = '\0';
     char host[256]; host[0] = '\0';             // this is the host as parsed from the cmdline when in client mode
     char get[256]; get[0] = '/'; get[1] = '\0'; // this is the uri to request in the upgrade message when connecting
+    int client_shutdown = 0;
 
     // websocket variables are prefixed with ws_
     unsigned char ws_masking_key[12];
@@ -369,8 +374,8 @@ int main(int argc, char **argv)
             fdset[0].fd = listen_sock;
             fdset[0].events = POLLIN;
 
-            if (DEBUG && VERBOSE_DEBUG)
-                fprintf(stderr, "[HPWS.C PID+%08X] Accept polling\n", my_pid);
+//            if (DEBUG && VERBOSE_DEBUG)
+//                fprintf(stderr, "[HPWS.C PID+%08X] Accept polling\n", my_pid);
 
             int poll_result = poll(&fdset[0], 1, POLL_TIMEOUT);
 
@@ -723,6 +728,28 @@ int main(int argc, char **argv)
 ** Main event loop
 ** --------------------------------------------------------------------------------------------------------------------
 */
+    #define WS_SEND_CLOSE_FRAME( reason_code, reason_string )\
+    {\
+        if (!ws_sent_close_frame) {\
+            if (DEBUG)\
+                fprintf(stderr, \
+                    "[HPWS.C PID+%08X] sending close frame %d %s\n", my_pid, reason_code, reason_string);\
+            unsigned char buf[127];\
+            buf[0] = 0b10001000;\
+            buf[1] = (char)(reason_string ?\
+                ( sizeof(reason_string)-1 > 123 ? 123 : sizeof(reason_string)-1) : \
+                2);\
+            buf[2] = ((reason_code) >> 8) & 0xff;\
+            buf[3] = ((reason_code) >> 0) & 0xff;\
+            if (buf[1] > 2)\
+                memcpy(buf + 4, reason_string, (size_t)buf[1]-2);\
+            SSL_ENQUEUE(buf, (size_t)buf[1]);\
+            ws_sent_close_frame = reason_code;\
+            goto ws_graceful_close;\
+        }\
+        if (client_shutdown == 0)\
+            client_shutdown = 1;\
+    }
 
     my_pid = getpid();
 
@@ -732,6 +759,10 @@ int main(int argc, char **argv)
 
     for (;;)
     {
+        int bytes = 0;
+        ioctl(client_fd, TIOCOUTQ, &bytes);
+        fprintf(stderr, "[HPWS.C PID+%08X] bytes to send %d\n", my_pid, bytes);
+        
         fdset[0].events &= ~POLLOUT;
         fdset[1].events = POLLIN;
         fdset[2].events = POLLIN;
@@ -743,6 +774,12 @@ int main(int argc, char **argv)
             fprintf(stderr, "[HPWS.C PID+%08X] polling\n", my_pid);
 
         int poll_result = poll(&fdset[0], 3, POLL_TIMEOUT);
+
+        if (client_shutdown)
+            ++client_shutdown;
+
+        if (client_shutdown > CLIENT_SHUTDOWN_CYCLES)
+            goto ws_graceful_close;
 
         // check if the parent process died
         if (kill (parent_pid, 0) != 0)
@@ -770,6 +807,24 @@ int main(int argc, char **argv)
             getsockopt(client_fd, SOL_SOCKET, SO_ERROR, (void *)&error, &errlen);
             fprintf(stderr, "[HPWS.C PID+%08X] socket error: %d errno: %d\n", my_pid, error, errno);
             GOTO_ERROR("websocket err hup nval", client_closed);
+        }
+        
+        // ------------------------------------------------------------------------------------------------------------
+        // outgoing data on the socket
+        // ------------------------------------------------------------------------------------------------------------
+        if (fdset[0].revents & POLLOUT && ssl_write_len)
+        {
+            bytes_written = write(client_fd, ssl_write_buf, ssl_write_len);
+            if (DEBUG)
+                fprintf(stderr, "[HPWS.C PID+%08X] RAW outgoing data %ld\n", my_pid, bytes_written);
+            if (bytes_written <= 0)
+                GOTO_ERROR("unable to write encrypted bytes to socket", ssl_error);
+            if (bytes_written < ssl_write_len)
+                memmove(ssl_write_buf, ssl_write_buf + bytes_written, ssl_write_len - bytes_written);
+            ssl_write_len -= bytes_written;
+            ssl_write_buf = (char*)realloc(ssl_write_buf, ssl_write_len);
+            if (DEBUG)
+                fprintf(stderr, "[HPWS.C PID+%08X] RAW bytes remaining to write: %d\n", my_pid, ssl_write_len);
         }
 
         // ------------------------------------------------------------------------------------------------------------
@@ -812,10 +867,12 @@ int main(int argc, char **argv)
             switch (*control_msg)
             {
                 case 'c': // close
-                    GOTO_ERROR("control ordered close", force_closed);
+                {
+                    int flag = 1; 
+                    setsockopt(client_fd, IPPROTO_TCP, TCP_NODELAY, (char *) &flag, sizeof(int));
+                    WS_SEND_CLOSE_FRAME(1000, "server closed");
                     continue;
-                    //break;
-
+                }
                 case 'a': // ack, we can unlock the specified buffer
                     {
                         if (bytes_read != 2 || (control_msg[1] != '0' && control_msg[1] != '1'))
@@ -920,24 +977,6 @@ int main(int argc, char **argv)
         }
 
         // ------------------------------------------------------------------------------------------------------------
-        // outgoing data on the socket
-        // ------------------------------------------------------------------------------------------------------------
-        if (fdset[0].revents & POLLOUT && ssl_write_len)
-        {
-            bytes_written = write(client_fd, ssl_write_buf, ssl_write_len);
-            if (DEBUG)
-                fprintf(stderr, "[HPWS.C PID+%08X] RAW outgoing data %ld\n", my_pid, bytes_written);
-            if (bytes_written <= 0)
-                GOTO_ERROR("unable to write encrypted bytes to socket", ssl_error);
-            if (bytes_written < ssl_write_len)
-                memmove(ssl_write_buf, ssl_write_buf + bytes_written, ssl_write_len - bytes_written);
-            ssl_write_len -= bytes_written;
-            ssl_write_buf = (char*)realloc(ssl_write_buf, ssl_write_len);
-            if (DEBUG)
-                fprintf(stderr, "[HPWS.C PID+%08X] RAW bytes remaining to write: %d\n", my_pid, ssl_write_len);
-        }
-
-        // ------------------------------------------------------------------------------------------------------------
         // incoming data on the socket
         // ------------------------------------------------------------------------------------------------------------
         if (fdset[0].revents & POLLIN || ws_pending_read)
@@ -971,7 +1010,7 @@ int main(int argc, char **argv)
             if (!SSL_is_init_finished(ssl))
                 goto skip_ws;
 
-            if (ws_sent_close_frame && ws_received_close_frame)
+            if (client_shutdown)
                 goto skip_ws;
 
             // --------------------------------------------------------------------------------------------------------
@@ -996,26 +1035,6 @@ int main(int argc, char **argv)
                         masking_key[i] = buf[ o + (i % 4)];\
                 }
 
-                #define WS_SEND_CLOSE_FRAME( reason_code, reason_string )\
-                {\
-                    if (!ws_sent_close_frame) {\
-                        if (DEBUG)\
-                            fprintf(stderr, \
-                                "[HPWS.C PID+%08X] sending close frame %d %s\n", my_pid, reason_code, reason_string);\
-                        unsigned char buf[127];\
-                        buf[0] = 0b10001000;\
-                        buf[1] = (char)(reason_string ?\
-                            ( sizeof(reason_string)-1 > 123 ? 123 : sizeof(reason_string)-1) : \
-                            2);\
-                        buf[2] = ((reason_code) >> 8) & 0xff;\
-                        buf[3] = ((reason_code) >> 0) & 0xff;\
-                        if (buf[1] > 2)\
-                            memcpy(buf + 4, reason_string, (size_t)buf[1]-2);\
-                        SSL_ENQUEUE(buf, (size_t)buf[1]);\
-                        ws_sent_close_frame = reason_code;\
-                        goto ws_graceful_close;\
-                    }\
-                }
 
                 #define WS_SEND_TEXT_FRAME( reason_string )\
                 {\
@@ -1293,8 +1312,6 @@ int main(int argc, char **argv)
                                     WS_SEND_CLOSE_FRAME(1002, "Control frames may not be fragmented");
 
                                 WS_SEND_CLOSE_FRAME(1000, "Bye!");
-                                /*WS_AT_LEAST(ws_preliminary_size, ws_header_bytes_read,
-                                            ws_wait_for_bytes);*/
                                 continue;
                             }
                             case 10: // pong frame
@@ -1707,8 +1724,11 @@ int main(int argc, char **argv)
               break;
         }
 
-        if (ws_sent_close_frame && ws_received_close_frame && ssl_encrypt_len == 0 && ssl_write_len == 0)
-            goto ws_graceful_close;
+        if (!client_shutdown && 
+            ws_sent_close_frame && ws_received_close_frame && ssl_encrypt_len == 0 && ssl_write_len == 0)
+            client_shutdown = 1;
+            
+            //goto ws_graceful_close;
 
         if (DEBUG && VERBOSE_DEBUG)
             fprintf(stderr, "[HPWS.C PID+%08X] end of event loop, back to start\n", my_pid);
@@ -1720,21 +1740,6 @@ int main(int argc, char **argv)
     goto cleanup;
 
     ws_graceful_close:;
-    {
-        if (DEBUG)
-            fprintf(stderr, "[HPWS.C PID+%08X] graceful close 1\n", my_pid);
-        struct linger sl;
-        sl.l_onoff = 1;		/* non-zero value enables linger option in kernel */
-        sl.l_linger = 1;	/* timeout interval in seconds */
-        shutdown(client_fd, SHUT_RDWR);
-
-        if (DEBUG)
-            fprintf(stderr, "[HPWS.C PID+%08X] graceful close 2\n", my_pid);
-        if (DEBUG)
-            fprintf(stderr, "[HPWS.C PID+%08X] graceful close 3\n", my_pid);
-
-    }
-
     parent_exit:;
     poll_error:;
     ws_handshake_error:;
@@ -1751,6 +1756,32 @@ int main(int argc, char **argv)
 
     cleanup:;
 
+    {
+        if (DEBUG)
+            fprintf(stderr, "[HPWS.C PID+%08X] graceful close 1\n", my_pid);
+
+        if (DEBUG)
+            fprintf(stderr, "[HPWS.C PID+%08X] graceful close 2\n", my_pid);
+
+        int bytes = 0;
+        ioctl(client_fd, TIOCOUTQ, &bytes);
+        while(bytes > 0)
+        {
+            if (DEBUG)
+                fprintf(stderr, "[HPWS.C PID+%08X] waiting for TCP to clear %d bytes\n", my_pid, bytes);
+            ioctl(client_fd, TIOCOUTQ, &bytes);
+        }
+
+        SSL_free(ssl);
+        shutdown(client_fd, SHUT_WR);
+        unsigned char shutdown_buf[1024];
+        while (recv(client_fd, shutdown_buf, 1024, 0) > 0);
+
+        if (DEBUG)
+            fprintf(stderr, "[HPWS.C PID+%08X] graceful close 3\n", my_pid);
+
+    }
+
     for (int i = 0; i < 4; ++i)
     {
         if (ws_buffer_fd[i] >= 0)
@@ -1761,8 +1792,8 @@ int main(int argc, char **argv)
         }
     }
 
+    // SSL_free called above in graceful
     EVP_cleanup();
-    SSL_free(ssl);
     free(ssl_write_buf);
     free(ssl_encrypt_buf);
 

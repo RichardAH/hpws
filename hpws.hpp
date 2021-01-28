@@ -138,11 +138,11 @@ namespace hpws
                 for (int i = 0; i < 4; ++i)
                 {
                     munmap(buffer[i], max_buffer_size);
-                    close(buffer_fd[i]);
+                    ::close(buffer_fd[i]);
                 }
 
-                close(control_line_fd[0]);
-                close(control_line_fd[1]);
+                ::close(control_line_fd[0]);
+                ::close(control_line_fd[1]);
 
                 if (HPWS_DEBUG)
                     fprintf(stderr, "[HPWS.HPP] child destructed pid = %d\n", child_pid);
@@ -213,6 +213,22 @@ namespace hpws
                 return error{2, "unknown control line command was sent by hpws"};
             }
             }
+        }
+
+        void close()
+        {
+            if (HPWS_DEBUG)
+                fprintf(stderr, "[HPWS.HPP] close called\n");
+
+            // send the control message informing hpws that we wish to close
+            char buf[1] = {'c'};
+
+            ::write(control_line_fd[1], buf, 1);
+
+            // wait for the process to end gracefully
+            int status;
+            printf("waitpid result: %d\n", waitpid(child_pid, &status, 0)); // add timeout here?
+
         }
 
         std::optional<error> write(std::string_view to_write)
@@ -371,8 +387,8 @@ namespace hpws
 
                 // --- PARENT
 
-                close(fd[1]);
-                close(fd[3]);
+                ::close(fd[1]);
+                ::close(fd[3]);
 
                 int child_fd[2] = {fd[0], fd[2]};
 
@@ -481,8 +497,8 @@ namespace hpws
                 if (fork_child_init)
                     fork_child_init();
 
-                close(fd[0]);
-                close(fd[2]);
+                ::close(fd[0]);
+                ::close(fd[2]);
 
                 // dup fd[1] into fd 3
                 /*if (dup2(fd[1], 3) == -1)
@@ -490,8 +506,8 @@ namespace hpws
                 if (dup2(fd[3], 4) == -1)
                     perror("dup2 fd[3]");
                 */
-                //                close(fd[1]);
-                //                close(fd[3]);
+                //                ::close(fd[1]);
+                //                ::close(fd[3]);
 
                 // we're assuming all fds above 3 will have close_exec flag
                 execv(bin_path.data(), (char *const *)argv_pass);
@@ -515,11 +531,11 @@ namespace hpws
             for (int i = 0; i < 4; ++i)
             {
                 if (fd[i] > 0)
-                    close(fd[i]);
+                    ::close(fd[i]);
                 if (mapping[i] != MAP_FAILED && mapping[i] != NULL)
                     munmap(mapping[i], max_buffer_size);
                 if (buffer_fd[i] > -1)
-                    close(buffer_fd[i]);
+                    ::close(buffer_fd[i]);
             }
 
             return error{error_code, std::string{error_msg}};
@@ -547,9 +563,9 @@ namespace hpws
                 if (mapping[i] != MAP_FAILED && mapping[i] != NULL)
                     munmap(mapping[i], max_buffer_size_);
                 if (i < 2 && child_fd[i] > -1)
-                    close(child_fd[i]);
+                    ::close(child_fd[i]);
                 if (buffer_fd[i] > -1)
-                    close(buffer_fd[i]);
+                    ::close(buffer_fd[i]);
             }
 
             if (pid_child > 0)
@@ -645,7 +661,7 @@ namespace hpws
                 if (HPWS_DEBUG)
                     fprintf(stderr, "[HPWS.HPP] On accept received SCM: child_fd[0] = %d, child_fd[1] = %d\n",
                             child_fd[0], child_fd[1]);
-                
+
                 fprintf(stderr, "[HPWS.HPP] Accept[4] called %d\n", calls);
             }
 
@@ -658,7 +674,7 @@ namespace hpws
             pfd.fd = child_fd[0]; // expect all setup messages on the hpws->hpcore controlfd (0)
             pfd.events = POLLIN;
             ret = poll(&pfd, 1, HPWS_SMALL_TIMEOUT); // 1 ms timeout
-            
+
             fprintf(stderr, "[HPWS.HPP] Accept[6] called %d\n", calls);
 
             // timeout or error
@@ -697,7 +713,7 @@ namespace hpws
                 if (cmsg == NULL || cmsg->cmsg_type != SCM_RIGHTS)
                     HPWS_ACCEPT_ERROR(203, "non-scm_rights message sent on accept child control line");
                 memcpy(&buffer_fd, CMSG_DATA(cmsg), sizeof(buffer_fd));
-                
+
                 fprintf(stderr, "[HPWS.HPP] Accept[10] called %d\n", calls);
 
                 for (int i = 0; i < 4; ++i)
@@ -722,7 +738,7 @@ namespace hpws
                         fprintf(stderr, "[HPWS.HPP] waiting for 'r' on child_fd[%d]=%d accept\n", i, child_fd[i]);
                     pfd.fd = child_fd[i];
                     pfd.events =  POLLERR | POLLHUP | POLLNVAL | POLLIN;
-                    
+
                     fprintf(stderr, "[HPWS.HPP] Accept[12] called %d\n", calls);
 
                     // now we wait for a 'r' ready message or for the socket/client to die
@@ -773,7 +789,7 @@ namespace hpws
                     waitpid(server_pid_, &status, 0 /* should we use WNOHANG? */);
                 }
 
-                close(master_control_fd_);
+                ::close(master_control_fd_);
             }
         }
 
@@ -854,7 +870,7 @@ namespace hpws
 
                 // --- PARENT
 
-                close(fd[1]);
+                ::close(fd[1]);
 
                 int flags = fcntl(fd[0], F_GETFD, NULL);
                 if (flags < 0)
@@ -920,11 +936,11 @@ namespace hpws
                 if (fork_child_init)
                     fork_child_init();
 
-                close(fd[0]);
+                ::close(fd[0]);
 
                 // dup fd[1] into fd 3
                 dup2(fd[1], 3);
-                close(fd[1]);
+                ::close(fd[1]);
 
                 // we're assuming all fds above 3 will have close_exec flag
                 execv(bin_path.data(), (char *const *)argv_pass);
@@ -946,9 +962,9 @@ namespace hpws
                 waitpid(pid, &status, 0 /* should we use WNOHANG? */);
             }
             if (fd[0] > 0)
-                close(fd[0]);
+                ::close(fd[0]);
             if (fd[1] > 0)
-                close(fd[1]);
+                ::close(fd[1]);
 
             return error{error_code, std::string{error_msg}};
         }
