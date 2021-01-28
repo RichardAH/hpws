@@ -1,6 +1,6 @@
 {
     "outdir": "/autobahn/client-reports",
-    "url": "wss://127.0.0.1",
+    "url": "wss://127.0.0.1:9001",
     "key": "/autobahn/key.pem",
     "cert": "/autobahn/cert.pem",
     "cases": ["*"],
