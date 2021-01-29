@@ -22,6 +22,9 @@ docker image inspect crossbario/autobahn-testsuite >/dev/null 2>&1 || \
     docker pull crossbario/autobahn-testsuite || \
     { echo "Check whether docker is installed properly."; exit 1; }
 
+# Clear existing reports.
+sudo rm -r ${PWD}/test/autobahn/server-reports >/dev/null 2>&1
+
 # Run the server test suite.
 docker run -it --rm -v "${PWD}/test/autobahn:/autobahn" --name hpws-autobahn-server-tester \
     crossbario/autobahn-testsuite /usr/local/bin/wstest --mode fuzzingclient --spec /autobahn/server-tests.json
