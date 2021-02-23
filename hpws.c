@@ -34,7 +34,9 @@
 #define DEBUG 0
 #define VERBOSE_DEBUG 0
 #define SSL_BUFFER_LENGTH 4096
-#define POLL_TIMEOUT 500 /* ms */
+#define POLL_TIMEOUT 50 /* ms */
+#define CLIENT_SHUTDOWN_CYCLES 3
+#define CLIENT_SHUTDOWN_FINAL_TIMEOUT 5000 /* microseconds */
 #define _GNU_SOURCE
 
 #include <stdio.h>
@@ -55,6 +57,9 @@
 #include <netdb.h>
 #include <sys/ioctl.h>
 #include <sys/prctl.h>
+#include <sys/socket.h>
+#include <netinet/in.h>
+#include <netinet/tcp.h>
 #include <signal.h>
 
 pid_t parent_pid = -1; // we set this on startup
@@ -181,6 +186,7 @@ int main(int argc, char **argv)
     char ip[40]; ip[0] = '\0';
     char host[256]; host[0] = '\0';             // this is the host as parsed from the cmdline when in client mode
     char get[256]; get[0] = '/'; get[1] = '\0'; // this is the uri to request in the upgrade message when connecting
+    int client_shutdown = 0;
 
     // websocket variables are prefixed with ws_
     unsigned char ws_masking_key[12];
@@ -369,8 +375,8 @@ int main(int argc, char **argv)
             fdset[0].fd = listen_sock;
             fdset[0].events = POLLIN;
 
-            if (DEBUG && VERBOSE_DEBUG)
-                fprintf(stderr, "[HPWS.C PID+%08X] Accept polling\n", my_pid);
+//            if (DEBUG && VERBOSE_DEBUG)
+//                fprintf(stderr, "[HPWS.C PID+%08X] Accept polling\n", my_pid);
 
             int poll_result = poll(&fdset[0], 1, POLL_TIMEOUT);
 
@@ -723,6 +729,30 @@ int main(int argc, char **argv)
 ** Main event loop
 ** --------------------------------------------------------------------------------------------------------------------
 */
+    #define WS_SEND_CLOSE_FRAME( reason_code, reason_string )\
+    {\
+        if (!ws_sent_close_frame) {\
+            if (DEBUG)\
+                fprintf(stderr, \
+                    "[HPWS.C PID+%08X] sending close frame %d %s\n", my_pid, reason_code, reason_string);\
+            unsigned char buf[127];\
+            buf[0] = 0b10001000U;\
+            buf[1] = (unsigned char)(reason_string ?\
+                ( sizeof(reason_string)-1 > 123 ? 123U : (unsigned char)sizeof(reason_string)-1) : \
+                0U) + 2U;\
+            buf[2] = ((reason_code) >> 8) & 0xff;\
+            buf[3] = ((reason_code) >> 0) & 0xff;\
+            if (buf[1] > 2)\
+                memcpy(buf + 4, reason_string, (size_t)(buf[1]-2));\
+            SSL_ENQUEUE(buf, (size_t)(buf[1] + 2));\
+            ws_sent_close_frame = reason_code;\
+            if (DEBUG)\
+                fprintf(stderr, \
+                    "[HPWS.C PID+%08X] sent close frame %d bytes\n", my_pid, (size_t)(buf[1]));\
+        }\
+        if (client_shutdown == 0)\
+            client_shutdown = 1;\
+    }
 
     my_pid = getpid();
 
@@ -732,6 +762,7 @@ int main(int argc, char **argv)
 
     for (;;)
     {
+        
         fdset[0].events &= ~POLLOUT;
         fdset[1].events = POLLIN;
         fdset[2].events = POLLIN;
@@ -744,9 +775,16 @@ int main(int argc, char **argv)
 
         int poll_result = poll(&fdset[0], 3, POLL_TIMEOUT);
 
+        if (client_shutdown)
+            ++client_shutdown;
+
+        if (client_shutdown > CLIENT_SHUTDOWN_CYCLES)
+            goto ws_graceful_close;
+
         // check if the parent process died
-        if (kill (parent_pid, 0) != 0)
-            GOTO_ERROR("parent process died", parent_exit);
+        if (kill (parent_pid, 0) != 0 && !client_shutdown)
+            client_shutdown = 1;
+//            GOTO_ERROR("parent process died", parent_exit);
 
         if (poll_result < 0)
             GOTO_ERROR("poll returned negative", poll_error);
@@ -771,154 +809,7 @@ int main(int argc, char **argv)
             fprintf(stderr, "[HPWS.C PID+%08X] socket error: %d errno: %d\n", my_pid, error, errno);
             GOTO_ERROR("websocket err hup nval", client_closed);
         }
-
-        // ------------------------------------------------------------------------------------------------------------
-        // incoming  message on the control line
-        // ------------------------------------------------------------------------------------------------------------
-
-        // check for errors in the control line
-        int dummy_buf[1];
-        if (fdset[1].revents & (POLLERR | POLLHUP | POLLNVAL) || read(control_fd[0], dummy_buf, 0))
-                GOTO_ERROR("control fd err hup nval", control_closed);
-
-        if (fdset[2].revents & (POLLERR | POLLHUP | POLLNVAL) || read(control_fd[1], dummy_buf, 0))
-                GOTO_ERROR("control fd err hup nval", control_closed);
-
-        for (int cl = 0; cl <= 1; ++cl)
-        if ( fdset[cl+1].revents & POLLIN )
-        {
-            if (DEBUG)
-                fprintf(stderr,
-                    "[HPWS.C PID+%08X] processing revents for control_fd[%d]=%d\n", my_pid, cl, control_fd[cl]);
-            unsigned char control_msg[12];
-            int bytes_read = recv(control_fd[cl], control_msg, sizeof(control_msg), 0);
-            if (bytes_read < 1)
-                GOTO_ERROR("received invalid control message or control fd has broken or closed",
-                           control_closed);
-
-            if (DEBUG)
-                fprintf(stderr, "[HPWS.C PID+%08X] control message received on control_fd[%d]=%d: `%.*s`\n", my_pid,
-                        cl, control_fd[cl], bytes_read, control_msg);
-
-            if (DEBUG)
-            {
-                int n = 0;
-                int err = ioctl(control_fd[cl], FIONREAD, &n);
-                fprintf(stderr,
-                        "[HPWS.C PID+%08X] Incoming message and still to read on controlfd[%d]=%d: %d (ioctl=%d)\n",
-                        my_pid, cl, control_fd[cl], n, err);
-            }
-
-            switch (*control_msg)
-            {
-                case 'c': // close
-                    GOTO_ERROR("control ordered close", force_closed);
-                    continue;
-                    //break;
-
-                case 'a': // ack, we can unlock the specified buffer
-                    {
-                        if (bytes_read != 2 || (control_msg[1] != '0' && control_msg[1] != '1'))
-                            GOTO_ERROR("received invalid 'c' message from control fd", control_error);
-
-                        if (DEBUG)
-                            printf("[HPWS.C PID+%08X] received ack for buffer %c\n", control_msg[1]);
-
-                        int unlock = control_msg[1] - '0';
-                        ws_buffer_lock[unlock] = 0;
-                        if (ws_buf_decode == NULL)
-                            ws_buf_decode =  ws_buffer[unlock];
-                    }
-                    continue;
-                    //break;
-
-                // ----------------------------------------------------------------------------------------------------
-                // incoming control fd message -> outgoing websocket message
-                // ----------------------------------------------------------------------------------------------------
-                case 'o': // outgoing frame on buffer x, of size y
-                {
-                    if (bytes_read != 6 || (control_msg[1] != '0' && control_msg[1] != '1'))
-                    {
-                        fprintf(stderr,
-                            "[HPWS.C PID+%08X] invalid o message received from hp:-----\n%.*s\n----------\n", my_pid,
-                            bytes_read, control_msg);
-                        GOTO_ERROR("received invalid 'o' message from control fd", control_error);
-                    }
-
-                    int lock = control_msg[1] - '0' + 2;
-                    uint64_t size = 0;
-                    DECODE_O_SIZE(control_msg, size);
-
-                    if (DEBUG)
-                        fprintf(stderr,
-                            "[HPWS.C PID+%08X] outgoing ws message from hp:\n%.*s\n--end message--\n", my_pid,
-                            size, ws_buffer[lock]);
-                    // construct a websocket frame
-                    {
-                        unsigned char buf[16];
-                        buf[0] = ( ws_text_mode ? 0b10000001 : 0b10000010 );
-                        if (size < 126) {
-                            buf[1] = (size) + (is_server ? 0 : 0b10000000); // set masking bit if client
-                            SSL_ENQUEUE(buf, 2);
-                        }
-                        else if (size <= 0xffff)
-                        {
-                            buf[1] = 126 + (is_server ? 0 : 0b10000000);
-                            buf[2] = ( size >> 8 ) & 0xff;
-                            buf[3] = ( size >> 0 ) & 0xff;
-                            SSL_ENQUEUE(buf, 4);
-                        }
-                        else
-                        {
-                            buf[1] = 127 + (is_server ? 0 : 0b10000000);
-                            buf[2] = ( size >> 56 ) & 0xff;
-                            buf[3] = ( size >> 48 ) & 0xff;
-                            buf[4] = ( size >> 40 ) & 0xff;
-                            buf[5] = ( size >> 32 ) & 0xff;
-                            buf[6] = ( size >> 24 ) & 0xff;
-                            buf[7] = ( size >> 16 ) & 0xff;
-                            buf[8] = ( size >>  8 ) & 0xff;
-                            buf[9] = ( size >>  0 ) & 0xff;
-                            SSL_ENQUEUE(buf, 10);
-                        }
-
-                        if (!is_server) {
-                            // masking key required!
-                            unsigned char masking_key[12];
-                            if (read(urand_fd, masking_key, 4) != 4)
-                                GOTO_ERROR("could not read 4 bytes from /dev/urandom", internal_error);
-
-                            SSL_ENQUEUE(masking_key, 4);
-
-                            // expand the key to 3 repeats for the block_xor
-                            for (int i = 0; i < 4; ++i) {
-                                masking_key[i + 4] = masking_key[i];
-                                masking_key[i + 8] = masking_key[i];
-                            }
-
-                            // XOR over the buffer
-                            block_xor(ws_buffer[lock], 0, size, masking_key, 0);
-                        }
-
-                        SSL_ENQUEUE(ws_buffer[lock], size);
-                        SSL_FLUSH_OUT();
-                        buf[0] = 'a';
-                        buf[1] = '0' + lock - 2;
-                        if (send(control_fd[1], buf, 2, 0) != 2) // ack is always sent to control line 1
-                            GOTO_ERROR("could not send ack to control fd", control_error);
-
-                    }
-                    continue;
-                    //break;
-                }
-                default:
-                    fprintf(stderr, "[HPWS.C PID+%08X] unknown control message received `%*.s`\n", my_pid,
-                            bytes_read, control_msg);
-                    GOTO_ERROR("unknown control message", control_error);
-            }
-
-        }
-
+        
         // ------------------------------------------------------------------------------------------------------------
         // outgoing data on the socket
         // ------------------------------------------------------------------------------------------------------------
@@ -971,7 +862,7 @@ int main(int argc, char **argv)
             if (!SSL_is_init_finished(ssl))
                 goto skip_ws;
 
-            if (ws_sent_close_frame && ws_received_close_frame)
+            if (client_shutdown)
                 goto skip_ws;
 
             // --------------------------------------------------------------------------------------------------------
@@ -996,26 +887,6 @@ int main(int argc, char **argv)
                         masking_key[i] = buf[ o + (i % 4)];\
                 }
 
-                #define WS_SEND_CLOSE_FRAME( reason_code, reason_string )\
-                {\
-                    if (!ws_sent_close_frame) {\
-                        if (DEBUG)\
-                            fprintf(stderr, \
-                                "[HPWS.C PID+%08X] sending close frame %d %s\n", my_pid, reason_code, reason_string);\
-                        unsigned char buf[127];\
-                        buf[0] = 0b10001000;\
-                        buf[1] = (char)(reason_string ?\
-                            ( sizeof(reason_string)-1 > 123 ? 123 : sizeof(reason_string)-1) : \
-                            2);\
-                        buf[2] = ((reason_code) >> 8) & 0xff;\
-                        buf[3] = ((reason_code) >> 0) & 0xff;\
-                        if (buf[1] > 2)\
-                            memcpy(buf + 4, reason_string, (size_t)buf[1]-2);\
-                        SSL_ENQUEUE(buf, (size_t)buf[1]);\
-                        ws_sent_close_frame = reason_code;\
-                        goto ws_graceful_close;\
-                    }\
-                }
 
                 #define WS_SEND_TEXT_FRAME( reason_string )\
                 {\
@@ -1288,57 +1159,60 @@ int main(int argc, char **argv)
                             case 8: // close frame
                             {
                                 ws_received_close_frame = 1;
-                                fprintf(stderr, "[HPWS.C PID+%08X] <CLOSE FRAME>\n", my_pid);
+                                if (DEBUG)
+                                    fprintf(stderr, "[HPWS.C PID+%08X] <CLOSE FRAME>\n", my_pid);
                                 if (!ws_fin)
-                                    WS_SEND_CLOSE_FRAME(1002, "Control frames may not be fragmented");
+                                    WS_PROTOCOL_ERROR("Control frames may not be fragmented");
 
                                 WS_SEND_CLOSE_FRAME(1000, "Bye!");
-                                /*WS_AT_LEAST(ws_preliminary_size, ws_header_bytes_read,
-                                            ws_wait_for_bytes);*/
                                 continue;
                             }
                             case 10: // pong frame
                             case 9: // ping frame
                             {
-                                fprintf(stderr, "[HPWS.C PID+%08X] <%s FRAME>\n", my_pid, 
-                                    (ws_opcode == 9 ? "PING" : "PONG"));
+                                if (DEBUG)
+                                    fprintf(stderr, "[HPWS.C PID+%08X] <%s FRAME>\n", my_pid, 
+                                        (ws_opcode == 9 ? "PING" : "PONG"));
                                 if (!ws_fin)
-                                    WS_SEND_CLOSE_FRAME(1002, "Control frames may not be fragmented");
+                                    WS_PROTOCOL_ERROR("Control frames may not be fragmented");
 
                                 if (ws_preliminary_size > 125)
-                                   WS_SEND_CLOSE_FRAME(1002, "Control frames may only have up to 125 bytes payloads");
+                                   WS_PROTOCOL_ERROR("Control frames may not be larger than 125");
                                 break;
                             }
                             case 0: // continuation frame
                             {
-                                fprintf(stderr, "[HPWS.C PID+%08X] <%s-CONT FRAME>\n", my_pid, 
-                                    (ws_text_mode ? "TEXT" : "BINARY"));
+                                if (DEBUG)
+                                    fprintf(stderr, "[HPWS.C PID+%08X] <%s-CONT FRAME>\n", my_pid, 
+                                        (ws_text_mode ? "TEXT" : "BINARY"));
                                 if (ws_last_fin)
-                                    WS_SEND_CLOSE_FRAME(1002, "Cannot send continuation frame following FIN frame.");
+                                    WS_PROTOCOL_ERROR("Cannot send continuation frame following FIN frame.");
                                 break;
                             }
                             case 1: // text frame
                             {
-                                fprintf(stderr, "[HPWS.C PID+%08X] <TEXT FRAME>\n", my_pid);
+                                if (DEBUG)
+                                    fprintf(stderr, "[HPWS.C PID+%08X] <TEXT FRAME>\n", my_pid);
                                 ws_text_mode = 1;
                                 ws_utf8_state = 0;
                                 if (!ws_last_fin)
-                                    WS_SEND_CLOSE_FRAME(1002, "Cannot send new text/bin frame unless prev was FIN");
+                                    WS_PROTOCOL_ERROR("Cannot send new text/bin frame unless prev was FIN");
                                 break;
                             }
                             case 2: // binary frame
                             {
-                                fprintf(stderr, "[HPWS.C PID+%08X] <BINARY FRAME>\n", my_pid);
+                                if (DEBUG)
+                                    fprintf(stderr, "[HPWS.C PID+%08X] <BINARY FRAME>\n", my_pid);
                                 ws_text_mode = 0;
                                 if (!ws_last_fin)
-                                    WS_SEND_CLOSE_FRAME(1002, "Cannot send new text/bin frame unless prev was FIN");
+                                    WS_PROTOCOL_ERROR("Cannot send new text/bin frame unless prev was FIN");
                                 break;
                             }
                             default:
                             {
-                                fprintf(stderr, "[HPWS.C PID+%08X] <INVALID FRAME>\n", my_pid);
-                                WS_SEND_CLOSE_FRAME(1002, "Invalid opcode");
-                                GOTO_ERROR("ws invalid opcode", ws_protocol_error);
+                                if (DEBUG)
+                                    fprintf(stderr, "[HPWS.C PID+%08X] <INVALID FRAME>\n", my_pid);
+                                WS_PROTOCOL_ERROR("Invalid opcode");
                             }
                         }
                         ws_state = 2;
@@ -1562,7 +1436,7 @@ int main(int argc, char **argv)
                                 if (DEBUG)
                                     fprintf(stderr, "[HPWS.C PID+%08X] invalid utf8 detected during text mode\n",
                                         my_pid);
-                                WS_SEND_CLOSE_FRAME(1002, "Invalid UTF8 sent in text/text-cont frame");
+                                WS_PROTOCOL_ERROR("Invalid UTF8 sent in text/text-cont frame");
                             }
                         }
 
@@ -1680,6 +1554,155 @@ int main(int argc, char **argv)
 
         }
 
+        // ------------------------------------------------------------------------------------------------------------
+        // incoming  message on the control line
+        // ------------------------------------------------------------------------------------------------------------
+
+        // check for errors in the control line
+        int dummy_buf[1];
+        if (fdset[1].revents & (POLLERR | POLLHUP | POLLNVAL) || read(control_fd[0], dummy_buf, 0))
+                GOTO_ERROR("control fd err hup nval", control_closed);
+
+        if (fdset[2].revents & (POLLERR | POLLHUP | POLLNVAL) || read(control_fd[1], dummy_buf, 0))
+                GOTO_ERROR("control fd err hup nval", control_closed);
+
+        for (int cl = 0; cl <= 1; ++cl)
+        if ( fdset[cl+1].revents & POLLIN )
+        {
+            if (DEBUG)
+                fprintf(stderr,
+                    "[HPWS.C PID+%08X] processing revents for control_fd[%d]=%d\n", my_pid, cl, control_fd[cl]);
+            unsigned char control_msg[12];
+            int bytes_read = recv(control_fd[cl], control_msg, sizeof(control_msg), 0);
+            if (bytes_read < 1)
+                GOTO_ERROR("received invalid control message or control fd has broken or closed",
+                           control_closed);
+
+            if (DEBUG)
+                fprintf(stderr, "[HPWS.C PID+%08X] control message received on control_fd[%d]=%d: `%.*s`\n", my_pid,
+                        cl, control_fd[cl], bytes_read, control_msg);
+
+            if (DEBUG)
+            {
+                int n = 0;
+                int err = ioctl(control_fd[cl], FIONREAD, &n);
+                fprintf(stderr,
+                        "[HPWS.C PID+%08X] Incoming message and still to read on controlfd[%d]=%d: %d (ioctl=%d)\n",
+                        my_pid, cl, control_fd[cl], n, err);
+            }
+
+            switch (*control_msg)
+            {
+                case 'c': // close
+                {
+                    int flag = 1; 
+                    setsockopt(client_fd, IPPROTO_TCP, TCP_NODELAY, (char *) &flag, sizeof(int));
+                    WS_SEND_CLOSE_FRAME(1000, "server closed");
+                    continue;
+                }
+                case 'a': // ack, we can unlock the specified buffer
+                    {
+                        if (bytes_read != 2 || (control_msg[1] != '0' && control_msg[1] != '1'))
+                            GOTO_ERROR("received invalid 'c' message from control fd", control_error);
+
+                        if (DEBUG)
+                            printf("[HPWS.C PID+%08X] received ack for buffer %c\n", control_msg[1]);
+
+                        int unlock = control_msg[1] - '0';
+                        ws_buffer_lock[unlock] = 0;
+                        if (ws_buf_decode == NULL)
+                            ws_buf_decode =  ws_buffer[unlock];
+                    }
+                    continue;
+                    //break;
+
+                // ----------------------------------------------------------------------------------------------------
+                // incoming control fd message -> outgoing websocket message
+                // ----------------------------------------------------------------------------------------------------
+                case 'o': // outgoing frame on buffer x, of size y
+                {
+                    if (bytes_read != 6 || (control_msg[1] != '0' && control_msg[1] != '1'))
+                    {
+                        fprintf(stderr,
+                            "[HPWS.C PID+%08X] invalid o message received from hp:-----\n%.*s\n----------\n", my_pid,
+                            bytes_read, control_msg);
+                        GOTO_ERROR("received invalid 'o' message from control fd", control_error);
+                    }
+
+                    int lock = control_msg[1] - '0' + 2;
+                    uint64_t size = 0;
+                    DECODE_O_SIZE(control_msg, size);
+
+                    if (DEBUG)
+                        fprintf(stderr,
+                            "[HPWS.C PID+%08X] outgoing ws message from hp:\n%.*s\n--end message--\n", my_pid,
+                            size, ws_buffer[lock]);
+                    // construct a websocket frame
+                    {
+                        unsigned char buf[16];
+                        buf[0] = ( ws_text_mode ? 0b10000001 : 0b10000010 );
+                        if (size < 126) {
+                            buf[1] = (size) + (is_server ? 0 : 0b10000000); // set masking bit if client
+                            SSL_ENQUEUE(buf, 2);
+                        }
+                        else if (size <= 0xffff)
+                        {
+                            buf[1] = 126 + (is_server ? 0 : 0b10000000);
+                            buf[2] = ( size >> 8 ) & 0xff;
+                            buf[3] = ( size >> 0 ) & 0xff;
+                            SSL_ENQUEUE(buf, 4);
+                        }
+                        else
+                        {
+                            buf[1] = 127 + (is_server ? 0 : 0b10000000);
+                            buf[2] = ( size >> 56 ) & 0xff;
+                            buf[3] = ( size >> 48 ) & 0xff;
+                            buf[4] = ( size >> 40 ) & 0xff;
+                            buf[5] = ( size >> 32 ) & 0xff;
+                            buf[6] = ( size >> 24 ) & 0xff;
+                            buf[7] = ( size >> 16 ) & 0xff;
+                            buf[8] = ( size >>  8 ) & 0xff;
+                            buf[9] = ( size >>  0 ) & 0xff;
+                            SSL_ENQUEUE(buf, 10);
+                        }
+
+                        if (!is_server) {
+                            // masking key required!
+                            unsigned char masking_key[12];
+                            if (read(urand_fd, masking_key, 4) != 4)
+                                GOTO_ERROR("could not read 4 bytes from /dev/urandom", internal_error);
+
+                            SSL_ENQUEUE(masking_key, 4);
+
+                            // expand the key to 3 repeats for the block_xor
+                            for (int i = 0; i < 4; ++i) {
+                                masking_key[i + 4] = masking_key[i];
+                                masking_key[i + 8] = masking_key[i];
+                            }
+
+                            // XOR over the buffer
+                            block_xor(ws_buffer[lock], 0, size, masking_key, 0);
+                        }
+
+                        SSL_ENQUEUE(ws_buffer[lock], size);
+                        SSL_FLUSH_OUT();
+                        buf[0] = 'a';
+                        buf[1] = '0' + lock - 2;
+                        if (send(control_fd[1], buf, 2, 0) != 2) // ack is always sent to control line 1
+                            GOTO_ERROR("could not send ack to control fd", control_error);
+
+                    }
+                    continue;
+                    //break;
+                }
+                default:
+                    fprintf(stderr, "[HPWS.C PID+%08X] unknown control message received `%*.s`\n", my_pid,
+                            bytes_read, control_msg);
+                    GOTO_ERROR("unknown control message", control_error);
+            }
+
+        }
+
         // encrypt pending ssl queue
         if (!SSL_is_init_finished(ssl))
             continue;
@@ -1707,8 +1730,11 @@ int main(int argc, char **argv)
               break;
         }
 
-        if (ws_sent_close_frame && ws_received_close_frame && ssl_encrypt_len == 0 && ssl_write_len == 0)
-            goto ws_graceful_close;
+        if (!client_shutdown && 
+            ws_sent_close_frame && ws_received_close_frame && ssl_encrypt_len == 0 && ssl_write_len == 0)
+            client_shutdown = 1;
+            
+            //goto ws_graceful_close;
 
         if (DEBUG && VERBOSE_DEBUG)
             fprintf(stderr, "[HPWS.C PID+%08X] end of event loop, back to start\n", my_pid);
@@ -1720,21 +1746,6 @@ int main(int argc, char **argv)
     goto cleanup;
 
     ws_graceful_close:;
-    {
-        if (DEBUG)
-            fprintf(stderr, "[HPWS.C PID+%08X] graceful close 1\n", my_pid);
-        struct linger sl;
-        sl.l_onoff = 1;		/* non-zero value enables linger option in kernel */
-        sl.l_linger = 1;	/* timeout interval in seconds */
-        shutdown(client_fd, SHUT_RDWR);
-
-        if (DEBUG)
-            fprintf(stderr, "[HPWS.C PID+%08X] graceful close 2\n", my_pid);
-        if (DEBUG)
-            fprintf(stderr, "[HPWS.C PID+%08X] graceful close 3\n", my_pid);
-
-    }
-
     parent_exit:;
     poll_error:;
     ws_handshake_error:;
@@ -1751,6 +1762,39 @@ int main(int argc, char **argv)
 
     cleanup:;
 
+    {
+        if (DEBUG)
+            fprintf(stderr, "[HPWS.C PID+%08X] graceful close 1\n", my_pid);
+
+        if (DEBUG)
+            fprintf(stderr, "[HPWS.C PID+%08X] graceful close 2\n", my_pid);
+
+
+        int bytes = 0;
+        ioctl(client_fd, TIOCOUTQ, &bytes);
+        int64_t fin_timer = 0;
+        while(bytes > 0 && fin_timer < CLIENT_SHUTDOWN_FINAL_TIMEOUT)
+        {
+            if (DEBUG)
+                fprintf(stderr, "[HPWS.C PID+%08X] waiting for TCP to clear %d bytes\n", my_pid, bytes);
+            ioctl(client_fd, TIOCOUTQ, &bytes);
+            fin_timer += 1000;
+            usleep(1000);
+        }
+
+        if (DEBUG && fin_timer >= CLIENT_SHUTDOWN_FINAL_TIMEOUT)
+            fprintf(stderr, "[HPWS.C PID+%08X] timed out while waiting for TCP to clear %d bytes\n", my_pid, bytes);
+            
+        shutdown(client_fd, SHUT_WR);
+        SSL_free(ssl);
+        unsigned char shutdown_buf[1024];
+        while (recv(client_fd, shutdown_buf, 1024, 0) > 0);
+
+        if (DEBUG)
+            fprintf(stderr, "[HPWS.C PID+%08X] graceful close 3\n", my_pid);
+
+    }
+
     for (int i = 0; i < 4; ++i)
     {
         if (ws_buffer_fd[i] >= 0)
@@ -1761,8 +1805,8 @@ int main(int argc, char **argv)
         }
     }
 
+    // SSL_free called above in graceful
     EVP_cleanup();
-    SSL_free(ssl);
     free(ssl_write_buf);
     free(ssl_encrypt_buf);
 

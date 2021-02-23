@@ -1,5 +1,5 @@
 {
-    "outdir": "/autobahn/reports",
+    "outdir": "/autobahn/server-reports",
     "servers": [
         {
             "url": "wss://172.17.0.1:8080"
