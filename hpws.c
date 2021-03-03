@@ -34,7 +34,7 @@
 #define DEBUG 0
 #define VERBOSE_DEBUG 0
 #define SSL_BUFFER_LENGTH 4096
-#define POLL_TIMEOUT 50 /* ms */
+#define POLL_TIMEOUT 500 /* ms */ // This timeout has to account the possible delays in communication via internet.
 #define CLIENT_SHUTDOWN_CYCLES 3
 #define CLIENT_SHUTDOWN_FINAL_TIMEOUT 5000 /* microseconds */
 #define _GNU_SOURCE
