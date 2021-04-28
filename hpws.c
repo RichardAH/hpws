@@ -34,7 +34,7 @@
 #define DEBUG 0
 #define VERBOSE_DEBUG 0
 #define SSL_BUFFER_LENGTH 4096
-#define POLL_TIMEOUT 500 /* ms */ // This timeout has to account the possible delays in communication via internet.
+#define POLL_TIMEOUT 2000 /* ms */ // This timeout has to account the possible delays in communication via internet.
 #define CLIENT_SHUTDOWN_CYCLES 3
 #define CLIENT_SHUTDOWN_FINAL_TIMEOUT 5000 /* microseconds */
 #define _GNU_SOURCE
@@ -1005,11 +1005,11 @@ int main(int argc, char **argv)
                         static char magic_string[] = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11";
 
                         // isolate the Key
-                        char* found = strstr( ws_buf_decode, to_find );
+                        char* found = strcasestr( ws_buf_decode, to_find );
                         if (!found)
                             GOTO_ERROR("websocket header not detected", ws_handshake_error);
 
-                        char* lineend = strstr( found, "\r\n" );
+                        char* lineend = strcasestr( found, "\r\n" );
                         if (!lineend)
                             GOTO_ERROR("websocket header not detected", ws_handshake_error);
 
