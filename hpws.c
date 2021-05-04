@@ -398,6 +398,11 @@ int main(int argc, char **argv)
                 exit(EXIT_FAILURE);
             }
 
+            // Set TCP no delay so OS packet buffering doesn't happen.
+            int optval = 1;
+            if (setsockopt(client_fd, IPPROTO_TCP, TCP_NODELAY, &optval, sizeof(optval)) == -1)
+                fprintf(stderr, "[HPWS.C PID+%08X] Failed to set NODELAY for accepted socket. errno:%d\n", errno);
+
             // RH TODO process/ connection / ip counting here
 
             // the instant we have done an accept we need to socketpair() and set up a new
@@ -544,6 +549,11 @@ int main(int argc, char **argv)
             fprintf(stderr, "[HPWS.C PID+%08X] Unable to connect, errno: %d\n", my_pid, errno);
             ABEND(93, "can't connect");
         }
+
+        // Set TCP no delay so OS packet buffering doesn't happen.
+        int optval = 1;
+        if (setsockopt(client_fd, IPPROTO_TCP, TCP_NODELAY, &optval, sizeof(optval)) == -1)
+            fprintf(stderr, "[HPWS.C PID+%08X] Failed to set NODELAY for client socket. errno:%d\n", errno);
 
         if (DEBUG)
             fprintf(stderr, "[HPWS.C PID+%08X] connected\n", my_pid);
@@ -1595,8 +1605,6 @@ int main(int argc, char **argv)
             {
                 case 'c': // close
                 {
-                    int flag = 1; 
-                    setsockopt(client_fd, IPPROTO_TCP, TCP_NODELAY, (char *) &flag, sizeof(int));
                     WS_SEND_CLOSE_FRAME(1000, "server closed");
                     continue;
                 }
