@@ -400,7 +400,8 @@ int main(int argc, char **argv)
 
             // Set TCP no delay so OS packet buffering doesn't happen.
             int optval = 1;
-            setsockopt(listen_sock, IPPROTO_TCP, TCP_NODELAY, &optval, sizeof(optval));
+            if (setsockopt(client_fd, IPPROTO_TCP, TCP_NODELAY, &optval, sizeof(optval)) == -1)
+                fprintf(stderr, "[HPWS.C PID+%08X] Failed to set NODELAY for accepted socket. errno:%d\n", errno);
 
             // RH TODO process/ connection / ip counting here
 
@@ -551,7 +552,8 @@ int main(int argc, char **argv)
 
         // Set TCP no delay so OS packet buffering doesn't happen.
         int optval = 1;
-        setsockopt(client_fd, IPPROTO_TCP, TCP_NODELAY, &optval, sizeof(optval));
+        if (setsockopt(client_fd, IPPROTO_TCP, TCP_NODELAY, &optval, sizeof(optval)) == -1)
+            fprintf(stderr, "[HPWS.C PID+%08X] Failed to set NODELAY for client socket. errno:%d\n", errno);
 
         if (DEBUG)
             fprintf(stderr, "[HPWS.C PID+%08X] connected\n", my_pid);
