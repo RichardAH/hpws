@@ -37,6 +37,7 @@
 #define POLL_TIMEOUT 2000 /* ms */ // This timeout has to account the possible delays in communication via internet.
 #define CLIENT_SHUTDOWN_CYCLES 3
 #define CLIENT_SHUTDOWN_FINAL_TIMEOUT 5000 /* microseconds */
+#define HPWS_VERSION "0.9.0"
 #define _GNU_SOURCE
 
 #include <stdio.h>
@@ -219,6 +220,12 @@ int main(int argc, char **argv)
 ** --------------------------------------------------------------------------------------------------------------------
 */
    {
+        if (strcmp(argv[1], "-v") == 0 && argc == 2)
+        {
+            printf("%s\n", HPWS_VERSION);
+            return 0;
+        }
+       
         #define PARSE_INT_OR_EXIT(str, msg, into_int)\
         {\
             if (sscanf(str, "%d", &into_int) != 1)\
