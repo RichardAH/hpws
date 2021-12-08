@@ -5,37 +5,37 @@
 #include <time.h>
 #include <stdbool.h>
 
-#define __IPBAN_SLOTS 100
+#define __IPBAN_SLOT_COUNT 100
 #define __IPBAN_V4 1
 #define __IPBAN_V6 2
 
-union __ipaddr
+union _ipban_addr
 {
     uint32_t ipv4;
     uint32_t ipv6[4];
 };
-struct __ban_slot
+struct __ipban_slot
 {
     uint8_t type;  // 0 = none, 1 = ipv4, 2 = ipv6
     time_t expire; // Epoch seconds at which the ip ban will expire.
-    union __ipaddr addr;
+    union _ipban_addr addr;
 };
 
-static struct __ban_slot __bans[__IPBAN_SLOTS];
-static int __filled_boundry = 0; // Indicates the last slot that has been touched.
+static struct __ipban_slot __ipbans[__IPBAN_SLOT_COUNT];
+static int __ipban_filled_boundry = 0; // Indicates the last slot that has been touched.
 
 /**
  * @return Pointer if found. NULL if not found/expired.
  */
-struct __ban_slot *__ipban_find(const uint32_t *addr, const uint8_t type)
+struct __ipban_slot *__ipban_find(const uint32_t *addr, const uint8_t type)
 {
-    struct __ban_slot *found = NULL;
+    struct __ipban_slot *found = NULL;
 
     if (type == __IPBAN_V4)
     {
-        for (int i = 0; i < __filled_boundry; i++)
+        for (int i = 0; i < __ipban_filled_boundry; i++)
         {
-            struct __ban_slot *slot = &__bans[i];
+            struct __ipban_slot *slot = &__ipbans[i];
             if (slot->type == type &&
                 slot->addr.ipv4 == *addr)
             {
@@ -46,9 +46,9 @@ struct __ban_slot *__ipban_find(const uint32_t *addr, const uint8_t type)
     }
     else
     {
-        for (int i = 0; i < __filled_boundry; i++)
+        for (int i = 0; i < __ipban_filled_boundry; i++)
         {
-            struct __ban_slot *slot = &__bans[i];
+            struct __ipban_slot *slot = &__ipbans[i];
             if (slot->type == type &&
                 slot->addr.ipv6[0] == addr[0] &&
                 slot->addr.ipv6[1] == addr[1] &&
@@ -72,21 +72,21 @@ struct __ban_slot *__ipban_find(const uint32_t *addr, const uint8_t type)
 }
 
 /**
- * @return 0 if success. -1 if failure.
+ * @return 0 if success. -1 if failure (due to all slots being filled).
  */
 int __ipban_ban(const uint32_t *addr, const uint32_t ttl_sec, const uint8_t type)
 {
     // Check if already exists.
-    struct __ban_slot *slot = __ipban_find(addr, type);
+    struct __ipban_slot *slot = __ipban_find(addr, type);
     if (!slot) // If not existing, find first vacant slot.
     {
-        for (int i = 0; i < __IPBAN_SLOTS; i++)
+        for (int i = 0; i < __IPBAN_SLOT_COUNT; i++)
         {
-            if (__bans[i].type == 0)
+            if (__ipbans[i].type == 0)
             {
-                slot = &__bans[i];
-                if (__filled_boundry < i + 1)
-                    __filled_boundry = i + 1;
+                slot = &__ipbans[i];
+                if (__ipban_filled_boundry < i + 1)
+                    __ipban_filled_boundry = i + 1;
                 break;
             }
         }
@@ -117,7 +117,7 @@ int __ipban_ban(const uint32_t *addr, const uint32_t ttl_sec, const uint8_t type
 
 void __ipban_unban(const uint32_t *addr, const uint8_t type)
 {
-    struct __ban_slot *slot = __ipban_find(addr, type);
+    struct __ipban_slot *slot = __ipban_find(addr, type);
     if (slot)
         slot->type = 0;
 }
