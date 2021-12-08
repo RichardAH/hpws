@@ -62,6 +62,7 @@
 #include <netinet/in.h>
 #include <netinet/tcp.h>
 #include <signal.h>
+#include "ipban.h"
 
 pid_t parent_pid = -1; // we set this on startup
 pid_t my_pid = -1; // set at various points throughout the program, always the currently executing process
@@ -405,6 +406,17 @@ int main(int argc, char **argv)
                 exit(EXIT_FAILURE);
             }
 
+            // Check whether this ip is banned.
+            const bool banned = (client_addr.sa.sa_family == AF_INET6) ?
+                                ipban_banned_v6((uint32_t *)&client_addr.sin6.sin6_addr):
+                                ipban_banned_v4(client_addr.sin.sin_addr.s_addr);
+            if (banned)
+            {
+                // Reject the client and go back to accept loop.
+                close(client_fd);
+                continue;
+            }
+        
             // Set TCP no delay so OS packet buffering doesn't happen.
             int optval = 1;
             if (setsockopt(client_fd, IPPROTO_TCP, TCP_NODELAY, &optval, sizeof(optval)) == -1)
@@ -472,7 +484,7 @@ int main(int argc, char **argv)
                 for (int i = 0; i < 4; ++i)
                     close(child_control_fd[i]);
                 close(client_fd);
-                continue;
+                continue; // Go back to the top of accept loop in server proc.
             }
 
 

@@ -2,7 +2,6 @@
 #define HPWS_INCLUDE
 #include <signal.h>
 #include <poll.h>
-#include <sys/types.h>
 #include <variant>
 #include <optional>
 #include <functional>

@@ -72,7 +72,7 @@ struct __ban_slot *__ipban_find(const uint32_t *addr, const uint8_t type)
 }
 
 /**
- * @return 0 if added. -1 if not added.
+ * @return 0 if success. -1 if failure.
  */
 int __ipban_ban(const uint32_t *addr, const uint32_t ttl_sec, const uint8_t type)
 {
@@ -115,6 +115,15 @@ int __ipban_ban(const uint32_t *addr, const uint32_t ttl_sec, const uint8_t type
     return -1;
 }
 
+void __ipban_unban(const uint32_t *addr, const uint8_t type)
+{
+    struct __ban_slot *slot = __ipban_find(addr, type);
+    if (slot)
+        slot->type = 0;
+}
+
+// Public interface-------------------------
+
 int ipban_ban_v4(const uint32_t addr, const uint32_t ttl_sec)
 {
     return __ipban_ban(&addr, ttl_sec, __IPBAN_V4);
@@ -125,12 +134,22 @@ int ipban_ban_v6(const uint32_t *addr, const uint32_t ttl_sec)
     return __ipban_ban(addr, ttl_sec, __IPBAN_V6);
 }
 
+bool ipban_unban_v4(const uint32_t addr)
+{
+    __ipban_unban(&addr, __IPBAN_V4);
+}
+
+int ipban_unban_v6(const uint32_t *addr)
+{
+    __ipban_unban(addr, __IPBAN_V6);
+}
+
 bool ipban_banned_v4(const uint32_t addr)
 {
     return __ipban_find(&addr, __IPBAN_V4) != NULL;
 }
 
-int ipban_banned_v6(const uint32_t *addr)
+bool ipban_banned_v6(const uint32_t *addr)
 {
     return __ipban_find(addr, __IPBAN_V6) != NULL;
 }
