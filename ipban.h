@@ -71,11 +71,15 @@ struct __ipban_slot *__ipban_find(const uint32_t *addr, const uint8_t type)
     return found;
 }
 
+// Public interface-------------------------
+
 /**
  * @return 0 if success. -1 if failure (due to all slots being filled).
  */
-int __ipban_ban(const uint32_t *addr, const uint32_t ttl_sec, const uint8_t type)
+int ipban_ban(const uint32_t *addr, const uint32_t ttl_sec, const bool ipv4)
 {
+    const uint8_t type = (ipv4 ? __IPBAN_V4 : __IPBAN_V6);
+
     // Check if already exists.
     struct __ipban_slot *slot = __ipban_find(addr, type);
     if (!slot) // If not existing, find first vacant slot.
@@ -115,43 +119,16 @@ int __ipban_ban(const uint32_t *addr, const uint32_t ttl_sec, const uint8_t type
     return -1;
 }
 
-void __ipban_unban(const uint32_t *addr, const uint8_t type)
+void ipban_unban(const uint32_t *addr, const bool ipv4)
 {
-    struct __ipban_slot *slot = __ipban_find(addr, type);
+    struct __ipban_slot *slot = __ipban_find(addr, (ipv4 ? __IPBAN_V4 : __IPBAN_V6));
     if (slot)
         slot->type = 0;
 }
 
-// Public interface-------------------------
-
-int ipban_ban_v4(const uint32_t addr, const uint32_t ttl_sec)
+bool ipban_is_banned(const uint32_t *addr, const bool ipv4)
 {
-    return __ipban_ban(&addr, ttl_sec, __IPBAN_V4);
-}
-
-int ipban_ban_v6(const uint32_t *addr, const uint32_t ttl_sec)
-{
-    return __ipban_ban(addr, ttl_sec, __IPBAN_V6);
-}
-
-bool ipban_unban_v4(const uint32_t addr)
-{
-    __ipban_unban(&addr, __IPBAN_V4);
-}
-
-int ipban_unban_v6(const uint32_t *addr)
-{
-    __ipban_unban(addr, __IPBAN_V6);
-}
-
-bool ipban_banned_v4(const uint32_t addr)
-{
-    return __ipban_find(&addr, __IPBAN_V4) != NULL;
-}
-
-bool ipban_banned_v6(const uint32_t *addr)
-{
-    return __ipban_find(addr, __IPBAN_V6) != NULL;
+    return __ipban_find(addr, (ipv4 ? __IPBAN_V4 : __IPBAN_V6)) != NULL;
 }
 
 #endif

@@ -604,6 +604,56 @@ namespace hpws
             return max_buffer_size_;
         }
 
+        void ban_ip(const uint32_t *addr, const uint32_t ttl_sec, const bool ipv4)
+        {
+            const size_t len = ipv4 ? 11 : 23;
+            char buf[len];
+            buf[0] = 'i';
+            buf[1] = '+';
+            buf[2] = ipv4 ? '4' : '6';
+
+            uint32_t *addr_buf = (uint32_t *)&buf[7];
+            if (ipv4)
+            {
+                addr_buf[0] = addr[0];
+            }
+            else
+            {
+                addr_buf[0] = addr[0];
+                addr_buf[1] = addr[2];
+                addr_buf[2] = addr[3];
+                addr_buf[3] = addr[4];
+            }
+
+            *(uint32_t *)&buf[len - 4] = ttl_sec;
+
+            write(this->master_control_fd_, buf, len);
+        }
+
+        void unban_ip(const uint32_t *addr, const bool ipv4)
+        {
+            const size_t len = ipv4 ? 7 : 19;
+            char buf[len];
+            buf[0] = 'i';
+            buf[1] = '-';
+            buf[2] = ipv4 ? '4' : '6';
+
+            uint32_t *addr_buf = (uint32_t *)&buf[7];
+            if (ipv4)
+            {
+                addr_buf[0] = addr[0];
+            }
+            else
+            {
+                addr_buf[0] = addr[0];
+                addr_buf[1] = addr[2];
+                addr_buf[2] = addr[3];
+                addr_buf[3] = addr[4];
+            }
+
+            write(this->master_control_fd_, buf, len);
+        }
+
         std::variant<client, error> accept(const bool no_block = false)
         {
 
