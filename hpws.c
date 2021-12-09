@@ -34,7 +34,7 @@
 #define DEBUG 0
 #define VERBOSE_DEBUG 0
 #define SSL_BUFFER_LENGTH 4096
-#define ACCEPT_TIMEOUT 500 /* ms */ // The delay used for accept() polling.
+#define ACCEPT_TIMEOUT 200 /* ms */ // The delay used for accept() polling.
 #define POLL_TIMEOUT 2000 /* ms */ // This timeout has to account for the possible delays in communication via internet.
 #define CLIENT_SHUTDOWN_CYCLES 3
 #define CLIENT_SHUTDOWN_FINAL_TIMEOUT 5000 /* microseconds */
@@ -430,7 +430,9 @@ int main(int argc, char **argv)
                             ipban_ban(ip, ttl_sec, is_ipv4);
                         }
                         else
+                        {
                             ipban_unban(ip, is_ipv4);
+                        }
                     }
                 }
             }

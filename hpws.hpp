@@ -17,6 +17,7 @@
 #include <fcntl.h>
 #include <sys/wait.h>
 #include <netdb.h>
+#include <arpa/inet.h>
 
 #define DECODE_O_SIZE(control_msg, into)                                             \
     {                                                                                \
@@ -83,6 +84,7 @@ namespace hpws
             pid_t child_pid,
             int buffer_fd[4],
             void *buffer[4]) : endpoint(endpoint),
+                               is_ipv4(endpoint.sa.sa_family == AF_INET),
                                max_buffer_size(max_buffer_size),
                                child_pid(child_pid), get(get)
         {
@@ -99,6 +101,8 @@ namespace hpws
         }
 
     public:
+        bool is_ipv4 = false;
+
         // No copy constructor
         client(const client &) = delete;
 
@@ -106,6 +110,7 @@ namespace hpws
         client(client &&old) : child_pid(old.child_pid),
                                max_buffer_size(old.max_buffer_size),
                                endpoint(old.endpoint),
+                               is_ipv4(old.is_ipv4),
                                get(old.get)
         {
             old.moved = true;
@@ -151,9 +156,11 @@ namespace hpws
         const std::variant<std::string, error> host_address()
         {
             char hostname[NI_MAXHOST];
-            const int ret = getnameinfo((sockaddr *)&endpoint, sizeof(sockaddr), hostname, sizeof(hostname), NULL, 0, NI_NUMERICHOST);
-            if (ret != 0)
-                return error{10, gai_strerror(ret)};
+            const char *ret = (endpoint.sa.sa_family == AF_INET)
+                                  ? inet_ntop(AF_INET, &endpoint.sin.sin_addr, hostname, NI_MAXHOST)
+                                  : inet_ntop(AF_INET6, &endpoint.sin6.sin6_addr, hostname, NI_MAXHOST);
+            if (!ret)
+                return error{10, "error in inet_ntop"};
 
             return hostname;
         }

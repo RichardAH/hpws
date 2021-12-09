@@ -9,16 +9,11 @@
 #define __IPBAN_V4 1
 #define __IPBAN_V6 2
 
-union _ipban_addr
-{
-    uint32_t ipv4;
-    uint32_t ipv6[4];
-};
 struct __ipban_slot
 {
-    uint8_t type;  // 0 = none, 1 = ipv4, 2 = ipv6
-    time_t expire; // Epoch seconds at which the ip ban will expire.
-    union _ipban_addr addr;
+    uint8_t type;     // 0 = none, 1 = ipv4, 2 = ipv6
+    time_t expire;    // Epoch seconds at which the ip ban will expire.
+    uint32_t addr[4]; // In ipv4 first element will be filled. ipv6 will fill all 4 elements.
 };
 
 static struct __ipban_slot __ipbans[__IPBAN_SLOT_COUNT];
@@ -37,7 +32,7 @@ struct __ipban_slot *__ipban_find(const uint32_t *addr, const uint8_t type)
         {
             struct __ipban_slot *slot = &__ipbans[i];
             if (slot->type == type &&
-                slot->addr.ipv4 == *addr)
+                slot->addr[0] == *addr)
             {
                 found = slot;
                 break;
@@ -50,10 +45,10 @@ struct __ipban_slot *__ipban_find(const uint32_t *addr, const uint8_t type)
         {
             struct __ipban_slot *slot = &__ipbans[i];
             if (slot->type == type &&
-                slot->addr.ipv6[0] == addr[0] &&
-                slot->addr.ipv6[1] == addr[1] &&
-                slot->addr.ipv6[2] == addr[2] &&
-                slot->addr.ipv6[3] == addr[3])
+                slot->addr[0] == addr[0] &&
+                slot->addr[1] == addr[1] &&
+                slot->addr[2] == addr[2] &&
+                slot->addr[3] == addr[3])
             {
                 found = slot;
                 break;
@@ -103,14 +98,14 @@ int ipban_ban(const uint32_t *addr, const uint32_t ttl_sec, const bool ipv4)
 
         if (type == __IPBAN_V4)
         {
-            slot->addr.ipv4 = *addr;
+            slot->addr[0] = *addr;
         }
         else
         {
-            slot->addr.ipv6[0] = addr[0];
-            slot->addr.ipv6[1] = addr[1];
-            slot->addr.ipv6[2] = addr[2];
-            slot->addr.ipv6[3] = addr[3];
+            slot->addr[0] = addr[0];
+            slot->addr[1] = addr[1];
+            slot->addr[2] = addr[2];
+            slot->addr[3] = addr[3];
         }
 
         return 0;
