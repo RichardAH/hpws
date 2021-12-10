@@ -426,7 +426,7 @@ int main(int argc, char **argv)
                                 continue;
                             }
 
-                            const uint32_t ttl_sec = (uint32_t)&control_msg[is_ipv4 ? 7 : 19]; // TTL seconds.
+                            const uint32_t ttl_sec = *(uint32_t *)&control_msg[is_ipv4 ? 7 : 19]; // TTL seconds.
                             ipban_ban(ip, ttl_sec, is_ipv4);
                         }
                         else
