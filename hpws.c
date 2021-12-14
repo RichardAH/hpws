@@ -1282,15 +1282,18 @@ int main(int argc, char **argv)
                                 break;
                             }
                             case 1: // text frame
-                            {
-                                if (DEBUG)
-                                    fprintf(stderr, "[HPWS.C PID+%08X] <TEXT FRAME>\n", my_pid);
-                                ws_text_mode = 1;
-                                ws_utf8_state = 0;
-                                if (!ws_last_fin)
-                                    WS_PROTOCOL_ERROR("Cannot send new text/bin frame unless prev was FIN");
-                                break;
-                            }
+                            // Disabling text-mode handling since it causes hpws to unpredictably operate in text vs binary modes depending on the
+                            // timing of concurrently receiving text and binary frames. (Possibly because ws_text_mode being a global variable)
+                            // Disabling this altogether to keep hpws in binary mode since that's all we need for hpcore. - Ravin
+                            // {
+                            //     if (DEBUG)
+                            //         fprintf(stderr, "[HPWS.C PID+%08X] <TEXT FRAME>\n", my_pid);
+                            //     ws_text_mode = 1;
+                            //     ws_utf8_state = 0;
+                            //     if (!ws_last_fin)
+                            //         WS_PROTOCOL_ERROR("Cannot send new text/bin frame unless prev was FIN");
+                            //     break;
+                            // }
                             case 2: // binary frame
                             {
                                 if (DEBUG)
