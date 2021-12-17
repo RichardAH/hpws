@@ -34,7 +34,8 @@
 #define DEBUG 0
 #define VERBOSE_DEBUG 0
 #define SSL_BUFFER_LENGTH 4096
-#define POLL_TIMEOUT 2000 /* ms */ // This timeout has to account the possible delays in communication via internet.
+#define ACCEPT_TIMEOUT 200 /* ms */ // The delay used for accept() polling.
+#define POLL_TIMEOUT 2000 /* ms */ // This timeout has to account for the possible delays in communication via internet.
 #define CLIENT_SHUTDOWN_CYCLES 3
 #define CLIENT_SHUTDOWN_FINAL_TIMEOUT 5000 /* microseconds */
 #define HPWS_VERSION "0.9.0"
@@ -62,6 +63,7 @@
 #include <netinet/in.h>
 #include <netinet/tcp.h>
 #include <signal.h>
+#include "ipban.h"
 
 pid_t parent_pid = -1; // we set this on startup
 pid_t my_pid = -1; // set at various points throughout the program, always the currently executing process
@@ -379,25 +381,86 @@ int main(int argc, char **argv)
 
         for(;;) {
 
-            fdset[0].fd = listen_sock;
-            fdset[0].events = POLLIN;
-
-//            if (DEBUG && VERBOSE_DEBUG)
-//                fprintf(stderr, "[HPWS.C PID+%08X] Accept polling\n", my_pid);
-
-            int poll_result = poll(&fdset[0], 1, POLL_TIMEOUT);
-
-            if (poll_result < -1)
+            // Read any incoming master control messages.
             {
-                perror("Accept loop poll");
-                exit(1);
+                fdset[0].fd = master_control_fd;
+                fdset[0].events = POLLIN;
+                
+                while(true)
+                {
+                    const int ctrl_poll = poll(fdset, 1, 1);
+
+                    if (ctrl_poll == -1)
+                    {
+                        perror("master control fd poll");
+                        exit(1);
+                    }
+
+                    if (ctrl_poll == 0) // No incoming control messages.
+                        break;
+
+                    unsigned char control_msg[32];
+                    int bytes_read = recv(master_control_fd, control_msg, sizeof(control_msg), 0);
+                    if (bytes_read < 1)
+                        GOTO_ERROR("received invalid master control message or master control fd has broken or closed",
+                                control_closed);
+
+                    // Check for ip ban control messages. Format: 'i[+/-][4/6][ip address (4bytes or 16bytes)][ttl (4)]'
+                    if (control_msg[0] == 'i' && bytes_read >= 2)
+                    {
+                        const bool is_ipv4 = (control_msg[2] == '4'); // ipv4 or ipv6
+                        if ((is_ipv4 && bytes_read < 7) || (!is_ipv4 && bytes_read < 19))
+                        {
+                            fprintf(stderr, "Malformed ip ban control message [1].");
+                            continue;
+                        }
+
+                        const bool is_ban = (control_msg[1] != '-'); // ban or unban (+ or -)
+                        const uint32_t *ip = &control_msg[3];
+
+                        if (is_ban)
+                        {
+                            if ((is_ipv4 && bytes_read < 11) || (!is_ipv4 && bytes_read < 23))
+                            {
+                                fprintf(stderr, "Malformed ip ban control message [2].");
+                                continue;
+                            }
+
+                            const uint32_t ttl_sec = *(uint32_t *)&control_msg[is_ipv4 ? 7 : 19]; // TTL seconds.
+                            ipban_ban(ip, ttl_sec, is_ipv4);
+                        }
+                        else
+                        {
+                            ipban_unban(ip, is_ipv4);
+                        }
+                    }
+                }
             }
 
-            if (kill (parent_pid, 0) != 0)
-                GOTO_ERROR("parent process died", parent_exit);
+            // Check for incoming connections to accept.
+            {
+                fdset[0].fd = listen_sock;
+                fdset[0].events = POLLIN;
 
-            if (poll_result == 0)
-                continue;
+                // if (DEBUG && VERBOSE_DEBUG)
+                //    fprintf(stderr, "[HPWS.C PID+%08X] Accept polling\n", my_pid);
+
+                const int accept_poll = poll(fdset, 1, ACCEPT_TIMEOUT);
+
+                if (accept_poll == -1)
+                {
+                    perror("Accept loop poll");
+                    exit(1);
+                }
+
+                if (kill (parent_pid, 0) != 0)
+                    GOTO_ERROR("parent process died", parent_exit);
+
+                if (accept_poll == 0) // No incoming connection to accept.
+                    continue;
+            }
+
+            // Reaching this point means there is an incoming connection to accept.
 
             client_fd = accept(listen_sock, (struct sockaddr*)&client_addr, &client_addr_len);
             if (client_fd < 0) {
@@ -405,6 +468,18 @@ int main(int argc, char **argv)
                 exit(EXIT_FAILURE);
             }
 
+            // Check whether this ip is banned.
+            {
+                const bool ipv4 = (client_addr.sa.sa_family != AF_INET6);
+                const uint32_t *addr = ipv4 ? &client_addr.sin.sin_addr.s_addr : (uint32_t *)&client_addr.sin6.sin6_addr;
+                if (ipban_is_banned(addr, ipv4))
+                {
+                    // Reject the client and go back to accept loop.
+                    close(client_fd);
+                    continue;
+                }
+            }
+        
             // Set TCP no delay so OS packet buffering doesn't happen.
             int optval = 1;
             if (setsockopt(client_fd, IPPROTO_TCP, TCP_NODELAY, &optval, sizeof(optval)) == -1)
@@ -472,7 +547,7 @@ int main(int argc, char **argv)
                 for (int i = 0; i < 4; ++i)
                     close(child_control_fd[i]);
                 close(client_fd);
-                continue;
+                continue; // Go back to the top of accept loop in server proc.
             }
 
 
@@ -1207,15 +1282,18 @@ int main(int argc, char **argv)
                                 break;
                             }
                             case 1: // text frame
-                            {
-                                if (DEBUG)
-                                    fprintf(stderr, "[HPWS.C PID+%08X] <TEXT FRAME>\n", my_pid);
-                                ws_text_mode = 1;
-                                ws_utf8_state = 0;
-                                if (!ws_last_fin)
-                                    WS_PROTOCOL_ERROR("Cannot send new text/bin frame unless prev was FIN");
-                                break;
-                            }
+                            // Disabling text-mode handling since it causes hpws to unpredictably operate in text vs binary modes depending on the
+                            // timing of concurrently receiving text and binary frames. (Possibly because ws_text_mode being a global variable)
+                            // Disabling this altogether to keep hpws in binary mode since that's all we need for hpcore. - Ravin
+                            // {
+                            //     if (DEBUG)
+                            //         fprintf(stderr, "[HPWS.C PID+%08X] <TEXT FRAME>\n", my_pid);
+                            //     ws_text_mode = 1;
+                            //     ws_utf8_state = 0;
+                            //     if (!ws_last_fin)
+                            //         WS_PROTOCOL_ERROR("Cannot send new text/bin frame unless prev was FIN");
+                            //     break;
+                            // }
                             case 2: // binary frame
                             {
                                 if (DEBUG)
